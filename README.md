@@ -12,6 +12,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
+> **Cyntrisec Labs project.** Cyntrisec's main product is [EphemeralML](https://github.com/cyntrisec/EphemeralML) — confidential AI inference with cryptographic receipts ([AIR v1](https://datatracker.ietf.org/doc/draft-tsyrulnikov-rats-attested-inference-receipt/)). Clawprint is a standalone Labs tool for agent audit trails.
+
 Clawprint is a tamper-evident audit trail for OpenClaw agent runs. It silently taps the gateway wire, capturing every trace a molt leaves behind — tool calls, outputs, lifecycle events — and seals them in a SHA-256 hash chain ledger. Replay sessions offline, inspect the evidence through the web dashboard, or query activity from Claude Desktop via MCP.
 
 **Not a proxy or firewall** — Clawprint is a passive observer. It watches the wire, never touches it.
