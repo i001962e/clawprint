@@ -699,7 +699,7 @@ function renderProof(proof){
    :'';
   const status='<div class="proof-row"><div><div class="proof-label">Registered</div><div>'+esc(when)+'</div></div></div>';
   const retryStatus=!hasRetrieval&&proof.errorText?'<div class="proof-note">Cryptowerk registration failed; the viewer will retry automatically. Last retry attempt: '+esc(when)+'.</div>':'';
-  const error=proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'';
+  const error=proof.errorText?'<div class="proof-error">'+esc(summarizeProofError(proof.errorText))+'</div>':'';
   parts.push(status+retrieval+link+retryStatus+error);
  }
  card.innerHTML='<div class="proof-grid">'+parts.join('')+'</div>';
@@ -777,7 +777,7 @@ function renderEvents(evs){
    proofRows.push('<div class="hash-row"><div class="hash-label">Cryptowerk retrieval</div><div class="hash-value">'+esc(retrievalId)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedRetrievalId+'\')">Copy retrieval ID</button>'+(proof.proofUrl?'<a class="mini-link" href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyEncoded(\''+encodeURIComponent(proof.proofUrl)+'\')">Copy proof URL</button>':'')+'</div></div>');
   } else if(proof&&proof.errorText){
    const lastAttempt=proof.registeredAt?new Date(proof.registeredAt).toLocaleString():'unknown';
-   proofRows.push('<div class="hash-row"><div class="hash-label">Cryptowerk status</div><div class="hash-note">Registration failed; the viewer will retry automatically. Last retry attempt: '+esc(lastAttempt)+'.</div><div class="proof-error">'+esc(proof.errorText)+'</div></div>');
+   proofRows.push('<div class="hash-row"><div class="hash-label">Cryptowerk status</div><div class="hash-note">Registration failed; the viewer will retry automatically. Last retry attempt: '+esc(lastAttempt)+'.</div><div class="proof-error">'+esc(summarizeProofError(proof.errorText))+'</div></div>');
   }
   const proofBlock=proofRows.join('');
   return '<div class="ev '+esc(e.kind)+'">'
@@ -818,6 +818,16 @@ function copyText(text){
  const input=document.createElement('textarea');input.value=text;document.body.appendChild(input);input.select();document.execCommand('copy');document.body.removeChild(input);
 }
 function copyEncoded(encoded){copyText(decodeURIComponent(encoded));}
+function summarizeProofError(text){
+ const s=String(text||'');
+ if(s.includes('Request header is too large')){
+  return 'Cryptowerk rejected the batch request because the URL was too large. Clawprint will retry with smaller batches.';
+ }
+ if(s.startsWith('Cryptowerk register failed (400 Bad Request): <!doctype html>')){
+  return 'Cryptowerk rejected the request with HTTP 400.';
+ }
+ return s;
+}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function escJs(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n');}
 

@@ -8,6 +8,8 @@ use crate::{CryptowerkProof, RunMeta};
 const DEFAULT_CRYPTOWERK_BASE_URL: &str = "https://developers.cryptowerk.com/platform";
 const CRYPTOWERK_PERMALINK_BASE: &str =
     "https://developers.cryptowerk.com/platform/permalink/sealapiverify";
+#[cfg(feature = "cryptowerk")]
+const MAX_REGISTER_QUERY_CHARS: usize = 3000;
 
 #[derive(Debug, Clone)]
 pub struct CryptowerkConfig {
@@ -177,6 +179,33 @@ impl CryptowerkRunAnchor {
             return Ok(Vec::new());
         }
 
+        if hashes.len() > 1 {
+            let mut all_proofs = Vec::with_capacity(hashes.len());
+            let mut start = 0usize;
+            while start < hashes.len() {
+                let mut end = start;
+                let mut query_len = "publiclyRetrievable=true".len();
+                while end < hashes.len() {
+                    let next_hash_len = if end == start {
+                        hashes[end].len()
+                    } else {
+                        hashes[end].len() + 1
+                    };
+                    if end > start && query_len + next_hash_len > MAX_REGISTER_QUERY_CHARS {
+                        break;
+                    }
+                    query_len += next_hash_len;
+                    end += 1;
+                }
+                if end == start {
+                    end += 1;
+                }
+                all_proofs.extend(self.register_hashes(&hashes[start..end])?);
+                start = end;
+            }
+            return Ok(all_proofs);
+        }
+
         let api_key = self
             .config
             .api_key
@@ -197,6 +226,13 @@ impl CryptowerkRunAnchor {
         let body = response.text()?;
 
         if !status.is_success() {
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && body.contains("Request header is too large")
+            {
+                return Err(anyhow!(
+                    "Cryptowerk register failed (400 Bad Request): request URL was too large for the server"
+                ));
+            }
             return Err(anyhow!("Cryptowerk register failed ({status}): {body}"));
         }
 
