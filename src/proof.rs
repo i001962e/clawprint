@@ -105,7 +105,7 @@ impl CryptowerkRunAnchor {
         if !base.contains("/API/") {
             base.push_str("/API/v8");
         }
-        format!("{base}/register?hashes={root_hash}")
+        format!("{base}/register?hashes={root_hash}&publiclyRetrievable=true")
     }
 
     fn extract_retrieval_id(value: &serde_json::Value) -> Option<String> {
