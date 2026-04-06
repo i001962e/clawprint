@@ -15,14 +15,18 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::RunId;
 use crate::storage::{RunStorage, list_runs_with_stats};
+use crate::{
+    RunId,
+    proof::{CryptowerkConfig, build_run_anchor, cryptowerk_failure},
+};
 
 #[derive(Clone)]
 struct ViewerState {
     base_path: PathBuf,
+    cryptowerk: Option<CryptowerkConfig>,
 }
 
 pub async fn bearer_auth(
@@ -46,7 +50,10 @@ pub async fn start_viewer(
     port: u16,
     token: Option<String>,
 ) -> Result<()> {
-    let state = ViewerState { base_path };
+    let state = ViewerState {
+        base_path,
+        cryptowerk: viewer_cryptowerk_config(),
+    };
 
     let app = Router::new()
         .route("/", get(index_handler))
@@ -79,7 +86,10 @@ pub async fn start_viewer_with_shutdown(
     token: Option<String>,
     ct: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    let state = ViewerState { base_path };
+    let state = ViewerState {
+        base_path,
+        cryptowerk: viewer_cryptowerk_config(),
+    };
 
     let app = Router::new()
         .route("/", get(index_handler))
@@ -152,6 +162,79 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+fn viewer_cryptowerk_config() -> Option<CryptowerkConfig> {
+    #[cfg(feature = "cryptowerk")]
+    {
+        return CryptowerkConfig::from_sources(true, None, None);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+fn proof_needs_retry(proof: Option<&crate::CryptowerkProof>) -> bool {
+    match proof {
+        None => true,
+        Some(proof) => proof
+            .retrieval_id
+            .as_deref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true),
+    }
+}
+
+fn retry_run_cryptowerk_backfill(
+    base_path: PathBuf,
+    run_id: RunId,
+    cryptowerk: Option<CryptowerkConfig>,
+) -> Result<()> {
+    let Some(config) = cryptowerk else {
+        return Ok(());
+    };
+    if !config.is_configured() {
+        return Ok(());
+    }
+
+    let storage = RunStorage::open(run_id, &base_path)?;
+    let anchor = build_run_anchor(Some(config));
+
+    let meta = storage.load_meta()?;
+    if proof_needs_retry(meta.cryptowerk.as_ref()) {
+        match anchor.anchor_completed_run(&meta) {
+            Ok(Some(proof)) => {
+                let mut updated_meta = meta.clone();
+                updated_meta.cryptowerk = Some(proof);
+                storage.write_meta(&updated_meta)?;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let mut updated_meta = meta.clone();
+                updated_meta.cryptowerk = Some(cryptowerk_failure(error.to_string()));
+                storage.write_meta(&updated_meta)?;
+            }
+        }
+    }
+
+    for event in storage.load_events(None)? {
+        if !proof_needs_retry(event.cryptowerk.as_ref()) {
+            continue;
+        }
+
+        match anchor.anchor_hash(&event.hash_self) {
+            Ok(Some(proof)) => {
+                storage.write_event_cryptowerk_proof(event.event_id, &proof)?;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let proof = cryptowerk_failure(error.to_string());
+                storage.write_event_cryptowerk_proof(event.event_id, &proof)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +334,18 @@ async fn get_run_handler(
     Path(run_id): Path<String>,
 ) -> impl IntoResponse {
     let run_id = RunId(run_id);
+    if let Err(error) = tokio::task::spawn_blocking({
+        let base_path = state.base_path.clone();
+        let run_id = run_id.clone();
+        let cryptowerk = state.cryptowerk.clone();
+        move || retry_run_cryptowerk_backfill(base_path, run_id, cryptowerk)
+    })
+    .await
+    .unwrap_or_else(|join_error| Err(anyhow::anyhow!(join_error.to_string())))
+    {
+        warn!("Cryptowerk backfill failed for run {}: {}", run_id.0, error);
+    }
+
     match RunStorage::open(run_id.clone(), &state.base_path) {
         Ok(storage) => {
             let valid = storage.verify_chain().unwrap_or(false);
@@ -290,6 +385,18 @@ async fn get_events_handler(
         .map(|v| v.iter().map(|s| s.as_str()).collect());
 
     let search = params.get("search").map(|s| s.as_str());
+
+    if let Err(error) = tokio::task::spawn_blocking({
+        let base_path = state.base_path.clone();
+        let run_id = run_id.clone();
+        let cryptowerk = state.cryptowerk.clone();
+        move || retry_run_cryptowerk_backfill(base_path, run_id, cryptowerk)
+    })
+    .await
+    .unwrap_or_else(|join_error| Err(anyhow::anyhow!(join_error.to_string())))
+    {
+        warn!("Cryptowerk backfill failed for run {}: {}", run_id.0, error);
+    }
 
     match RunStorage::open(run_id, &state.base_path) {
         Ok(storage) => {
@@ -428,6 +535,8 @@ a.back:hover{color:var(--text)}
 .proof-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;font-size:.85rem}
 .proof-card a{color:var(--accent2);text-decoration:none}
 .proof-card a:hover{text-decoration:underline}
+.mini-link{display:inline-flex;align-items:center;justify-content:center;padding:4px 10px;border:1px solid var(--border);background:var(--card);color:var(--text) !important;border-radius:999px;cursor:pointer;font-size:.72rem;text-decoration:none !important;transition:all .15s}
+.mini-link:hover{border-color:var(--text);text-decoration:none !important}
 .proof-grid{display:grid;gap:12px}
 .proof-row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .proof-label{font-size:.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
@@ -565,7 +674,7 @@ function renderProof(proof){
    ?'<div class="proof-row"><div><div class="proof-label">Cryptowerk retrieval</div><div class="proof-value">'+esc(proof.retrievalId)+'</div></div><div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(proof.retrievalId)+'\')">Copy retrieval ID</button></div></div>'
    :'';
   const link=proof.proofUrl
-   ?'<div class="proof-row"><div><div class="proof-label">External verify</div><div><a href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a></div></div><div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button></div></div>'
+   ?'<div class="proof-row"><div><div class="proof-label">External verify</div><div class="proof-actions"><a class="mini-link" href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a></div></div><div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button></div></div>'
    :'';
   const status='<div class="proof-row"><div><div class="proof-label">Registered</div><div>'+esc(when)+'</div></div></div>';
   const error=proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'';
@@ -603,14 +712,19 @@ function renderEvents(evs){
   const hash=e.hash_self?e.hash_self.substring(0,16):'';
   const selfHash=e.hash_self||'Unavailable';
   const prevHash=e.hash_prev||'First event in chain';
-  const canonicalJson=e.canonical_json||'Unavailable';
+ const canonicalJson=e.canonical_json||'Unavailable';
   const evidenceBundle=e.evidence_bundle_json||'Unavailable';
   const proof=e.cryptowerk;
   const payload=JSON.stringify(e.payload,null,2);
   const retrievalId=proof&&proof.retrievalId?proof.retrievalId:'Unavailable';
+  const encodedSelfHash=encodeURIComponent(selfHash);
+  const encodedPrevHash=encodeURIComponent(prevHash);
+  const encodedCanonicalJson=encodeURIComponent(canonicalJson);
+  const encodedEvidenceBundle=encodeURIComponent(evidenceBundle);
+  const encodedRetrievalId=encodeURIComponent(retrievalId);
   const proofBlock=proof
    ?('<div class="hash-row"><div class="hash-label">Cryptowerk retrieval</div><div class="hash-value">'+esc(retrievalId)+'</div>'
-      +'<div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(retrievalId)+'\')">Copy retrieval ID</button>'+(proof.proofUrl?'<a href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button>':'')+'</div>'
+      +'<div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedRetrievalId+'\')">Copy retrieval ID</button>'+(proof.proofUrl?'<a class="mini-link" href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyEncoded(\''+encodeURIComponent(proof.proofUrl)+'\')">Copy proof URL</button>':'')+'</div>'
       +(proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'')
       +'</div>')
    :'';
@@ -620,9 +734,9 @@ function renderEvents(evs){
    +'<button class="toggle" onclick="tog(this)">'+(collapse?'Show':'Hide')+'</button>'
    +'<div class="ev-payload'+(collapse?'':' open')+'">'
    +'<div class="hash-meta">'
-   +'<div class="hash-row"><div class="hash-label">Event hash</div><div class="hash-value">'+esc(selfHash)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(selfHash)+'\')">Copy event hash</button></div></div>'
-   +'<div class="hash-row"><div class="hash-label">Previous hash</div><div class="hash-value">'+esc(prevHash)+'</div>'+(e.hash_prev?'<div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(prevHash)+'\')">Copy previous hash</button></div>':'')+'</div>'
-   +'<div class="hash-row"><div class="hash-label">Independent verification</div><div class="hash-note">Copy the canonical event data, hash it locally, compare it to the event hash above, then use the retrieval ID for external lookup if present.</div><div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(canonicalJson)+'\')">Copy canonical JSON</button><button class="mini-btn" onclick="copyText(\''+escJs(evidenceBundle)+'\')">Copy evidence bundle</button></div></div>'
+   +'<div class="hash-row"><div class="hash-label">Event hash</div><div class="hash-value">'+esc(selfHash)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedSelfHash+'\')">Copy event hash</button></div></div>'
+   +'<div class="hash-row"><div class="hash-label">Previous hash</div><div class="hash-value">'+esc(prevHash)+'</div>'+(e.hash_prev?'<div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedPrevHash+'\')">Copy previous hash</button></div>':'')+'</div>'
+   +'<div class="hash-row"><div class="hash-label">Independent verification</div><div class="hash-note">Copy the canonical event data, hash it locally, compare it to the event hash above, then use the retrieval ID for external lookup if present.</div><div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedCanonicalJson+'\')">Copy canonical JSON</button><button class="mini-btn" onclick="copyEncoded(\''+encodedEvidenceBundle+'\')">Copy evidence bundle</button></div></div>'
    +proofBlock
    +'</div>'
    +'<pre>'+esc(payload)+'</pre></div>'
@@ -651,6 +765,7 @@ function copyText(text){
  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text);return;}
  const input=document.createElement('textarea');input.value=text;document.body.appendChild(input);input.select();document.execCommand('copy');document.body.removeChild(input);
 }
+function copyEncoded(encoded){copyText(decodeURIComponent(encoded));}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function escJs(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n');}
 
