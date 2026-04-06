@@ -146,6 +146,11 @@ impl Event {
     }
 
     pub fn canonical_json_string(&self) -> String {
+        serde_json::to_string(&self.canonical_event())
+            .expect("canonical event must be JSON-serializable")
+    }
+
+    pub fn canonical_json_pretty_string(&self) -> String {
         serde_json::to_string_pretty(&self.canonical_event())
             .expect("canonical event must be JSON-serializable")
     }
@@ -154,6 +159,7 @@ impl Event {
         serde_json::to_string_pretty(&serde_json::json!({
             "schema": "clawprint-event-evidence/v1",
             "canonicalEvent": self.canonical_event(),
+            "exactHashInput": self.canonical_json_string(),
             "expectedHash": self.hash_self,
             "previousHash": self.hash_prev,
             "cryptowerk": self.cryptowerk,

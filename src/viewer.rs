@@ -420,6 +420,7 @@ async fn get_events_handler(
                                 "hash_self": event.hash_self,
                                 "cryptowerk": event.cryptowerk,
                                 "canonical_json": event.canonical_json_string(),
+                                "canonical_json_pretty": event.canonical_json_pretty_string(),
                                 "evidence_bundle_json": event.evidence_bundle_json_string(),
                             })
                         })
@@ -712,7 +713,8 @@ function renderEvents(evs){
   const hash=e.hash_self?e.hash_self.substring(0,16):'';
   const selfHash=e.hash_self||'Unavailable';
   const prevHash=e.hash_prev||'First event in chain';
- const canonicalJson=e.canonical_json||'Unavailable';
+  const canonicalJson=e.canonical_json||'Unavailable';
+  const canonicalJsonPretty=e.canonical_json_pretty||canonicalJson;
   const evidenceBundle=e.evidence_bundle_json||'Unavailable';
   const proof=e.cryptowerk;
   const payload=JSON.stringify(e.payload,null,2);
@@ -736,7 +738,7 @@ function renderEvents(evs){
    +'<div class="hash-meta">'
    +'<div class="hash-row"><div class="hash-label">Event hash</div><div class="hash-value">'+esc(selfHash)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedSelfHash+'\')">Copy event hash</button></div></div>'
    +'<div class="hash-row"><div class="hash-label">Previous hash</div><div class="hash-value">'+esc(prevHash)+'</div>'+(e.hash_prev?'<div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedPrevHash+'\')">Copy previous hash</button></div>':'')+'</div>'
-   +'<div class="hash-row"><div class="hash-label">Independent verification</div><div class="hash-note">Copy the canonical event data, hash it locally, compare it to the event hash above, then use the retrieval ID for external lookup if present.</div><div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedCanonicalJson+'\')">Copy canonical JSON</button><button class="mini-btn" onclick="copyEncoded(\''+encodedEvidenceBundle+'\')">Copy evidence bundle</button></div></div>'
+   +'<div class="hash-row"><div class="hash-label">Independent verification</div><div class="hash-note">Copy exact hash input to get the same SHA-256 Clawprint registered. The formatted JSON is only for reading.</div><div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedCanonicalJson+'\')">Copy exact hash input</button><button class="mini-btn" onclick="copyEncoded(\''+encodeURIComponent(canonicalJsonPretty)+'\')">Copy formatted JSON</button><button class="mini-btn" onclick="copyEncoded(\''+encodedEvidenceBundle+'\')">Copy evidence bundle</button></div></div>'
    +proofBlock
    +'</div>'
    +'<pre>'+esc(payload)+'</pre></div>'
