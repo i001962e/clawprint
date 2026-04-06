@@ -254,11 +254,13 @@ async fn get_run_handler(
     match RunStorage::open(run_id.clone(), &state.base_path) {
         Ok(storage) => {
             let valid = storage.verify_chain().unwrap_or(false);
+            let cryptowerk = storage.load_meta().ok().and_then(|meta| meta.cryptowerk);
             Json(serde_json::json!({
                 "run_id": run_id.0,
                 "event_count": storage.event_count(),
                 "root_hash": storage.root_hash(),
                 "chain_valid": valid,
+                "cryptowerk": cryptowerk,
             }))
             .into_response()
         }
@@ -402,6 +404,10 @@ a.back:hover{color:var(--text)}
 .stat-value{font-size:1.25rem;font-weight:700}
 .section{margin-bottom:32px}
 .section h2{font-size:.8rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:12px}
+.proof-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;font-size:.85rem}
+.proof-card a{color:var(--accent2);text-decoration:none}
+.proof-card a:hover{text-decoration:underline}
+.proof-error{color:var(--red);margin-top:6px}
 .bar-row{display:flex;align-items:center;gap:10px;margin-bottom:4px;font-size:.8rem}
 .bar-label{width:110px;color:var(--dim);font-family:'SF Mono',SFMono-Regular,Menlo,monospace;font-size:.75rem}
 .bar-track{flex:1;background:var(--border);border-radius:4px;height:8px;overflow:hidden}
@@ -459,6 +465,11 @@ footer span{opacity:.5}
 <div id="chart"></div>
 </div>
 
+<div class="section" id="proof-section" style="display:none">
+<h2>External proof</h2>
+<div class="proof-card" id="proof-card"></div>
+</div>
+
 <div class="section">
 <h2>Trace log</h2>
 <div class="filters">
@@ -491,8 +502,21 @@ async function init(){
  const si=document.getElementById('s-integrity');
  si.textContent=run.chain_valid?'Sealed':'Compromised';
  si.style.color=run.chain_valid?'var(--green)':'var(--red)';
+ renderProof(run.cryptowerk);
  renderChart(stats.event_breakdown);
  loadEvents();
+}
+
+function renderProof(proof){
+ const section=document.getElementById('proof-section');
+ const card=document.getElementById('proof-card');
+ if(!proof){return;}
+ section.style.display='block';
+ const when=proof.registeredAt?new Date(proof.registeredAt).toLocaleString():'unknown';
+ const link=proof.proofUrl?'<a href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a>':'';
+ const retrieval=proof.retrievalId?'<div>Retrieval ID: <code>'+esc(proof.retrievalId)+'</code></div>':'';
+ const error=proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'';
+ card.innerHTML='<div>Registered: '+esc(when)+'</div>'+retrieval+(link?'<div>'+link+'</div>':'')+error;
 }
 
 function renderChart(b){

@@ -12,6 +12,7 @@ pub mod gateway;
 pub mod ledger;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+pub mod proof;
 pub mod record;
 pub mod redact;
 pub mod replay;
@@ -185,6 +186,8 @@ pub struct RunMeta {
     pub root_hash: String,
     pub gateway_url: String,
     pub version: String,
+    #[serde(default)]
+    pub cryptowerk: Option<CryptowerkProof>,
 }
 
 impl RunMeta {
@@ -197,8 +200,18 @@ impl RunMeta {
             root_hash: String::new(),
             gateway_url,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            cryptowerk: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CryptowerkProof {
+    pub retrieval_id: Option<String>,
+    pub proof_url: Option<String>,
+    pub registered_at: DateTime<Utc>,
+    pub error_text: Option<String>,
 }
 
 /// Configuration for Clawprint
@@ -216,6 +229,8 @@ pub struct Config {
     pub batch_size: usize,
     /// Flush interval in milliseconds
     pub flush_interval_ms: u64,
+    /// Optional post-seal external anchoring configuration
+    pub cryptowerk: Option<proof::CryptowerkConfig>,
 }
 
 impl Default for Config {
@@ -227,6 +242,7 @@ impl Default for Config {
             auth_token: None,
             batch_size: 100,
             flush_interval_ms: 200,
+            cryptowerk: None,
         }
     }
 }

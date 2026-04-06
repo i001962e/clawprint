@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     Config, Event, EventId, EventKind, RunId, RunMeta,
     gateway::{GatewayClient, GatewayEvent},
+    proof::{build_run_anchor, cryptowerk_failure},
     redact::redact_json,
     storage::RunStorage,
 };
@@ -102,11 +103,45 @@ impl RecordingSession {
             root_hash,
             gateway_url: self.config.gateway_url.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            cryptowerk: None,
         };
 
         storage.finalize(&meta)?;
-
         let valid = storage.verify_chain().unwrap_or(false);
+
+        if valid {
+            let anchor = build_run_anchor(self.config.cryptowerk.clone());
+            match anchor.anchor_completed_run(&meta) {
+                Ok(Some(cryptowerk)) => {
+                    let mut updated_meta = meta.clone();
+                    updated_meta.cryptowerk = Some(cryptowerk);
+                    if let Err(error) = storage.write_meta(&updated_meta) {
+                        warn!("Failed to persist Cryptowerk metadata: {}", error);
+                    }
+                }
+                Ok(None) => {
+                    if self.config.cryptowerk.is_some() {
+                        info!(
+                            "Cryptowerk anchoring skipped because runtime configuration was incomplete"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!("Cryptowerk anchoring failed: {}", error);
+                    let mut updated_meta = meta.clone();
+                    updated_meta.cryptowerk = Some(cryptowerk_failure(error.to_string()));
+                    if let Err(write_error) = storage.write_meta(&updated_meta) {
+                        warn!(
+                            "Failed to persist Cryptowerk error metadata: {}",
+                            write_error
+                        );
+                    }
+                }
+            }
+        } else if self.config.cryptowerk.is_some() {
+            warn!("Skipping Cryptowerk anchoring because local hash-chain verification failed");
+        }
+
         let size_bytes = storage.storage_size_bytes().unwrap_or(0);
         let duration_secs = ended_at.signed_duration_since(started_at).num_seconds();
 

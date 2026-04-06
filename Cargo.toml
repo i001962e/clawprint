@@ -51,11 +51,13 @@ walkdir = "2.4"
 # MCP server
 rmcp = { version = "0.14", features = ["server", "macros", "transport-io", "transport-streamable-http-server"], optional = true }
 tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 
 [features]
 default = ["viewer", "mcp"]
 viewer = ["axum", "tower-http"]
 mcp = ["rmcp"]
+cryptowerk = ["dep:reqwest"]
 
 [profile.release]
 opt-level = 3

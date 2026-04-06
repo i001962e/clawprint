@@ -296,13 +296,28 @@ impl RunStorage {
     pub fn finalize(&mut self, meta: &RunMeta) -> Result<()> {
         self.flush()?;
 
+        self.write_meta(meta)?;
+
+        info!(
+            "Finalized run {} at {:?}",
+            self.run_id.0,
+            self.base_path.join("meta.json")
+        );
+
+        Ok(())
+    }
+
+    pub fn write_meta(&self, meta: &RunMeta) -> Result<()> {
         let meta_path = self.base_path.join("meta.json");
         let meta_json = serde_json::to_string_pretty(meta)?;
         fs::write(&meta_path, meta_json)?;
-
-        info!("Finalized run {} at {:?}", self.run_id.0, meta_path);
-
         Ok(())
+    }
+
+    pub fn load_meta(&self) -> Result<RunMeta> {
+        let meta_path = self.base_path.join("meta.json");
+        let meta_json = fs::read_to_string(meta_path)?;
+        Ok(serde_json::from_str(&meta_json)?)
     }
 
     pub fn run_path(&self) -> &Path {

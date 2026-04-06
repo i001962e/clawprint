@@ -102,6 +102,8 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 
+#[cfg(feature = "cryptowerk")]
+use clawprint::proof::CryptowerkConfig;
 use clawprint::{
     Config,
     daemon::{run_daemon, run_daemon_with_shutdown},
@@ -142,6 +144,18 @@ enum Commands {
         /// Batch size for SQLite commits
         #[arg(long, default_value = "100")]
         batch_size: usize,
+        /// Register the finalized run seal with Cryptowerk after local verification
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk: bool,
+        /// Cryptowerk API base URL
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk_base_url: Option<String>,
+        /// Cryptowerk API key
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk_api_key: Option<String>,
     },
     /// List recorded runs
     List {
@@ -423,6 +437,12 @@ async fn main() -> Result<()> {
             token,
             no_redact,
             batch_size,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk_base_url,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk_api_key,
         } => {
             let auth_token = match token {
                 Some(t) => {
@@ -443,6 +463,10 @@ async fn main() -> Result<()> {
                 },
             };
 
+            #[cfg(feature = "cryptowerk")]
+            let cryptowerk =
+                CryptowerkConfig::from_sources(cryptowerk, cryptowerk_base_url, cryptowerk_api_key);
+
             let config = Config {
                 output_dir: out,
                 redact_secrets: !no_redact,
@@ -450,6 +474,10 @@ async fn main() -> Result<()> {
                 auth_token,
                 batch_size,
                 flush_interval_ms: 200,
+                #[cfg(feature = "cryptowerk")]
+                cryptowerk,
+                #[cfg(not(feature = "cryptowerk"))]
+                cryptowerk: None,
             };
 
             print_banner("Tracking molt activity");
@@ -459,6 +487,16 @@ async fn main() -> Result<()> {
                 "Redaction: {}",
                 if config.redact_secrets { "on" } else { "off" }
             );
+            #[cfg(feature = "cryptowerk")]
+            if let Some(cryptowerk) = &config.cryptowerk {
+                if cryptowerk.is_configured() {
+                    info!("Cryptowerk: enabled");
+                } else {
+                    warn!(
+                        "Cryptowerk requested without an API key; external anchoring will be skipped"
+                    );
+                }
+            }
 
             let session = RecordingSession::start(config, run_name).await?;
             let run_id = session.run_id().clone();
@@ -863,6 +901,7 @@ async fn main() -> Result<()> {
                     auth_token,
                     batch_size,
                     flush_interval_ms: 200,
+                    cryptowerk: None,
                 };
 
                 cprintln!(
@@ -969,6 +1008,7 @@ async fn main() -> Result<()> {
                 auth_token,
                 batch_size,
                 flush_interval_ms: 200,
+                cryptowerk: None,
             };
 
             print_banner("Watching the wire");
