@@ -2,7 +2,7 @@
   <img src="clawprint.jpg" alt="Clawprint" width="300">
 </p>
 
-<h1 align="center">Clawprint</h1>
+<h1 align="center">Clawprint</h1> 
 
 <p align="center"><b>Every molt leaves a mark. Trace. Verify. Trust.</b></p>
 
