@@ -296,8 +296,29 @@ async fn get_events_handler(
             match storage.load_events_filtered(kind_refs.as_deref(), search, offset, per_page) {
                 Ok((events, total)) => {
                     let total_pages = total.div_ceil(per_page as u64);
+                    let events_json: Vec<_> = events
+                        .into_iter()
+                        .map(|event| {
+                            serde_json::json!({
+                                "run_id": event.run_id.0,
+                                "event_id": event.event_id.0,
+                                "ts": event.ts,
+                                "kind": event.kind,
+                                "span_id": event.span_id,
+                                "parent_span_id": event.parent_span_id,
+                                "actor": event.actor,
+                                "payload": event.payload,
+                                "artifact_refs": event.artifact_refs,
+                                "hash_prev": event.hash_prev,
+                                "hash_self": event.hash_self,
+                                "cryptowerk": event.cryptowerk,
+                                "canonical_json": event.canonical_json_string(),
+                                "evidence_bundle_json": event.evidence_bundle_json_string(),
+                            })
+                        })
+                        .collect();
                     Json(serde_json::json!({
-                        "events": events,
+                        "events": events_json,
                         "total": total,
                         "page": page,
                         "per_page": per_page,
@@ -448,6 +469,7 @@ a.back:hover{color:var(--text)}
 .hash-label{font-size:.68rem;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
 .hash-value{font-size:.72rem;font-family:'SF Mono',SFMono-Regular,Menlo,monospace;word-break:break-all}
 .hash-actions{display:flex;gap:8px;flex-wrap:wrap}
+.hash-note{font-size:.74rem;color:var(--dim)}
 .toggle{background:none;border:none;color:var(--accent2);cursor:pointer;font-size:.75rem;padding:0;margin-bottom:4px}
 .toggle:hover{text-decoration:underline}
 .pager{display:flex;gap:4px;justify-content:center;margin-top:20px}
@@ -581,11 +603,14 @@ function renderEvents(evs){
   const hash=e.hash_self?e.hash_self.substring(0,16):'';
   const selfHash=e.hash_self||'Unavailable';
   const prevHash=e.hash_prev||'First event in chain';
+  const canonicalJson=e.canonical_json||'Unavailable';
+  const evidenceBundle=e.evidence_bundle_json||'Unavailable';
   const proof=e.cryptowerk;
   const payload=JSON.stringify(e.payload,null,2);
+  const retrievalId=proof&&proof.retrievalId?proof.retrievalId:'Unavailable';
   const proofBlock=proof
-   ?('<div class="hash-row"><div class="hash-label">Cryptowerk retrieval</div><div class="hash-value">'+esc(proof.retrievalId||'Unavailable')+'</div>'
-      +(proof.proofUrl?'<div class="hash-actions"><a href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button></div>':'')
+   ?('<div class="hash-row"><div class="hash-label">Cryptowerk retrieval</div><div class="hash-value">'+esc(retrievalId)+'</div>'
+      +'<div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(retrievalId)+'\')">Copy retrieval ID</button>'+(proof.proofUrl?'<a href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button>':'')+'</div>'
       +(proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'')
       +'</div>')
    :'';
@@ -597,6 +622,7 @@ function renderEvents(evs){
    +'<div class="hash-meta">'
    +'<div class="hash-row"><div class="hash-label">Event hash</div><div class="hash-value">'+esc(selfHash)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(selfHash)+'\')">Copy event hash</button></div></div>'
    +'<div class="hash-row"><div class="hash-label">Previous hash</div><div class="hash-value">'+esc(prevHash)+'</div>'+(e.hash_prev?'<div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(prevHash)+'\')">Copy previous hash</button></div>':'')+'</div>'
+   +'<div class="hash-row"><div class="hash-label">Independent verification</div><div class="hash-note">Copy the canonical event data, hash it locally, compare it to the event hash above, then use the retrieval ID for external lookup if present.</div><div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(canonicalJson)+'\')">Copy canonical JSON</button><button class="mini-btn" onclick="copyText(\''+escJs(evidenceBundle)+'\')">Copy evidence bundle</button></div></div>'
    +proofBlock
    +'</div>'
    +'<pre>'+esc(payload)+'</pre></div>'

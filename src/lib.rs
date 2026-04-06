@@ -130,9 +130,8 @@ impl Event {
     /// Panics if the canonical form cannot be serialized to JSON,
     /// since silent fallback would produce identical hashes for
     /// different events and break chain integrity.
-    pub fn compute_hash(&self) -> String {
-        // Create canonical representation without hash fields
-        let canonical = CanonicalEvent {
+    fn canonical_event(&self) -> CanonicalEvent {
+        CanonicalEvent {
             run_id: self.run_id.clone(),
             event_id: self.event_id,
             ts: self.ts,
@@ -143,7 +142,27 @@ impl Event {
             payload: self.payload.clone(),
             artifact_refs: self.artifact_refs.clone(),
             hash_prev: self.hash_prev.clone(),
-        };
+        }
+    }
+
+    pub fn canonical_json_string(&self) -> String {
+        serde_json::to_string_pretty(&self.canonical_event())
+            .expect("canonical event must be JSON-serializable")
+    }
+
+    pub fn evidence_bundle_json_string(&self) -> String {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema": "clawprint-event-evidence/v1",
+            "canonicalEvent": self.canonical_event(),
+            "expectedHash": self.hash_self,
+            "previousHash": self.hash_prev,
+            "cryptowerk": self.cryptowerk,
+        }))
+        .expect("evidence bundle must be JSON-serializable")
+    }
+
+    pub fn compute_hash(&self) -> String {
+        let canonical = self.canonical_event();
 
         // Serialize to canonical JSON - must not silently default
         let json =
