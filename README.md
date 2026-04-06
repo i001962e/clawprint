@@ -79,7 +79,7 @@ Clawprint can optionally register a completed `record` run with Cryptowerk after
 cargo build --features cryptowerk
 clawprint record \
   --cryptowerk \
-  --cryptowerk-base-url https://developers.cryptowerk.com/platform \
+  --cryptowerk-base-url https://aiagent.cryptowerk.com/platform \
   --cryptowerk-api-key "$CRYPTOWERK_API_KEY"
 ```
 

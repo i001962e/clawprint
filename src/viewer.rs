@@ -407,7 +407,15 @@ a.back:hover{color:var(--text)}
 .proof-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;font-size:.85rem}
 .proof-card a{color:var(--accent2);text-decoration:none}
 .proof-card a:hover{text-decoration:underline}
+.proof-grid{display:grid;gap:12px}
+.proof-row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.proof-label{font-size:.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+.proof-value{font-family:'SF Mono',SFMono-Regular,Menlo,monospace;font-size:.78rem;word-break:break-all}
+.proof-actions{display:flex;gap:8px;flex-wrap:wrap}
+.proof-note{color:var(--dim);font-size:.78rem}
 .proof-error{color:var(--red);margin-top:6px}
+.mini-btn{padding:4px 10px;border:1px solid var(--border);background:var(--card);color:var(--text);border-radius:999px;cursor:pointer;font-size:.72rem;transition:all .15s}
+.mini-btn:hover{border-color:var(--text)}
 .bar-row{display:flex;align-items:center;gap:10px;margin-bottom:4px;font-size:.8rem}
 .bar-label{width:110px;color:var(--dim);font-family:'SF Mono',SFMono-Regular,Menlo,monospace;font-size:.75rem}
 .bar-track{flex:1;background:var(--border);border-radius:4px;height:8px;overflow:hidden}
@@ -435,6 +443,11 @@ a.back:hover{color:var(--text)}
 .ev-payload{background:var(--code-bg);border-radius:6px;padding:10px;max-height:0;overflow:hidden;transition:max-height .3s ease}
 .ev-payload.open{max-height:600px;overflow-y:auto}
 .ev-payload pre{margin:0;font-size:.75rem;white-space:pre-wrap;word-break:break-word;color:var(--text);font-family:'SF Mono',SFMono-Regular,Menlo,monospace}
+.hash-meta{margin:0 0 10px 0;display:grid;gap:8px}
+.hash-row{display:grid;gap:4px}
+.hash-label{font-size:.68rem;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+.hash-value{font-size:.72rem;font-family:'SF Mono',SFMono-Regular,Menlo,monospace;word-break:break-all}
+.hash-actions{display:flex;gap:8px;flex-wrap:wrap}
 .toggle{background:none;border:none;color:var(--accent2);cursor:pointer;font-size:.75rem;padding:0;margin-bottom:4px}
 .toggle:hover{text-decoration:underline}
 .pager{display:flex;gap:4px;justify-content:center;margin-top:20px}
@@ -466,7 +479,7 @@ footer span{opacity:.5}
 </div>
 
 <div class="section" id="proof-section" style="display:none">
-<h2>External proof</h2>
+<h2>Verification</h2>
 <div class="proof-card" id="proof-card"></div>
 </div>
 
@@ -496,6 +509,7 @@ async function init(){
   fetch('/api/runs/'+R).then(r=>r.json()),
   fetch('/api/runs/'+R+'/stats').then(r=>r.json())
  ]);
+ window.__run=run;
  document.getElementById('rid').textContent=R.substring(0,8);
  document.getElementById('s-events').textContent=run.event_count;
  document.getElementById('s-agents').textContent=stats.agent_run_count;
@@ -510,13 +524,32 @@ async function init(){
 function renderProof(proof){
  const section=document.getElementById('proof-section');
  const card=document.getElementById('proof-card');
- if(!proof){return;}
+ const rootHash=window.__run?.root_hash;
+ if(!proof && !rootHash){return;}
  section.style.display='block';
- const when=proof.registeredAt?new Date(proof.registeredAt).toLocaleString():'unknown';
- const link=proof.proofUrl?'<a href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a>':'';
- const retrieval=proof.retrievalId?'<div>Retrieval ID: <code>'+esc(proof.retrievalId)+'</code></div>':'';
- const error=proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'';
- card.innerHTML='<div>Registered: '+esc(when)+'</div>'+retrieval+(link?'<div>'+link+'</div>':'')+error;
+ const parts=[];
+ if(rootHash){
+  parts.push(
+   '<div class="proof-row">'
+   +'<div><div class="proof-label">Local seal</div><div class="proof-value">'+esc(rootHash)+'</div></div>'
+   +'<div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(rootHash)+'\')">Copy hash</button></div>'
+   +'</div>'
+  );
+ }
+ parts.push('<div class="proof-note">The sealed impression is the final local chain hash. Each trace entry also carries its own hash and previous-link in the log details below.</div>');
+ if(proof){
+  const when=proof.registeredAt?new Date(proof.registeredAt).toLocaleString():'unknown';
+  const retrieval=proof.retrievalId
+   ?'<div class="proof-row"><div><div class="proof-label">Cryptowerk retrieval</div><div class="proof-value">'+esc(proof.retrievalId)+'</div></div><div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(proof.retrievalId)+'\')">Copy retrieval ID</button></div></div>'
+   :'';
+  const link=proof.proofUrl
+   ?'<div class="proof-row"><div><div class="proof-label">External verify</div><div><a href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a></div></div><div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button></div></div>'
+   :'';
+  const status='<div class="proof-row"><div><div class="proof-label">Registered</div><div>'+esc(when)+'</div></div></div>';
+  const error=proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'';
+  parts.push(status+retrieval+link+error);
+ }
+ card.innerHTML='<div class="proof-grid">'+parts.join('')+'</div>';
 }
 
 function renderChart(b){
@@ -546,12 +579,19 @@ function renderEvents(evs){
   const collapse=e.kind==='TICK'||e.kind==='PRESENCE';
   const ts=new Date(e.ts).toLocaleString();
   const hash=e.hash_self?e.hash_self.substring(0,16):'';
+  const selfHash=e.hash_self||'Unavailable';
+  const prevHash=e.hash_prev||'First event in chain';
   const payload=JSON.stringify(e.payload,null,2);
   return '<div class="ev '+esc(e.kind)+'">'
    +'<div class="ev-head"><span class="ev-kind '+esc(e.kind)+'">'+esc(e.kind)+'</span><span class="ev-ts">'+esc(ts)+'</span></div>'
-   +'<div class="ev-hash">'+esc(hash)+'</div>'
+   +'<div class="ev-hash">Hash '+esc(hash)+(e.hash_prev?' · linked':' · chain start')+'</div>'
    +'<button class="toggle" onclick="tog(this)">'+(collapse?'Show':'Hide')+'</button>'
-   +'<div class="ev-payload'+(collapse?'':' open')+'"><pre>'+esc(payload)+'</pre></div>'
+   +'<div class="ev-payload'+(collapse?'':' open')+'">'
+   +'<div class="hash-meta">'
+   +'<div class="hash-row"><div class="hash-label">Event hash</div><div class="hash-value">'+esc(selfHash)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(selfHash)+'\')">Copy event hash</button></div></div>'
+   +'<div class="hash-row"><div class="hash-label">Previous hash</div><div class="hash-value">'+esc(prevHash)+'</div>'+(e.hash_prev?'<div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(prevHash)+'\')">Copy previous hash</button></div>':'')+'</div>'
+   +'</div>'
+   +'<pre>'+esc(payload)+'</pre></div>'
    +'</div>';
  }).join('');
 }
@@ -573,7 +613,12 @@ function renderPager(){
 }
 
 function go(p){if(p>=1&&p<=pages){page=p;loadEvents();}}
+function copyText(text){
+ if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text);return;}
+ const input=document.createElement('textarea');input.value=text;document.body.appendChild(input);input.select();document.execCommand('copy');document.body.removeChild(input);
+}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function escJs(s){return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n');}
 
 document.querySelectorAll('.fbtn[data-k]').forEach(b=>{
  b.addEventListener('click',()=>{
@@ -588,6 +633,7 @@ let st;document.getElementById('q').addEventListener('input',e=>{
  clearTimeout(st);st=setTimeout(()=>{search=e.target.value.trim();page=1;loadEvents();},300);
 });
 
+window.__run={};
 init();
 </script>
 </body>
