@@ -115,6 +115,14 @@ impl CryptowerkRunAnchor {
             }
         }
 
+        if let Some(documents) = value.get("documents").and_then(|item| item.as_array()) {
+            for document in documents {
+                if let Some(id) = Self::extract_retrieval_id(document) {
+                    return Some(id);
+                }
+            }
+        }
+
         for key in ["data", "result", "response"] {
             if let Some(inner) = value.get(key) {
                 if let Some(id) = Self::extract_retrieval_id(inner) {
@@ -151,8 +159,11 @@ impl RunAnchor for CryptowerkRunAnchor {
 
         let json: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| anyhow!("invalid Cryptowerk response: {error}"))?;
-        let retrieval_id = Self::extract_retrieval_id(&json)
-            .ok_or_else(|| anyhow!("Cryptowerk response did not include retrievalId"))?;
+        let retrieval_id = Self::extract_retrieval_id(&json).ok_or_else(|| {
+            anyhow!(
+                "Cryptowerk response did not include retrievalId. Expected fields like retrievalId or documents[0].retrievalId; body: {body}"
+            )
+        })?;
 
         Ok(Some(CryptowerkProof {
             retrieval_id: Some(retrieval_id.clone()),
@@ -193,6 +204,24 @@ mod tests {
         assert_eq!(
             CryptowerkRunAnchor::extract_retrieval_id(&payload).as_deref(),
             Some("ri_nested")
+        );
+    }
+
+    #[cfg(feature = "cryptowerk")]
+    #[test]
+    fn extract_retrieval_id_handles_documents_array() {
+        let payload = serde_json::json!({
+            "minSupportedAPIVersion": 8,
+            "maxSupportedAPIVersion": 6,
+            "documents": [
+                {
+                    "retrievalId": "ri_document"
+                }
+            ]
+        });
+        assert_eq!(
+            CryptowerkRunAnchor::extract_retrieval_id(&payload).as_deref(),
+            Some("ri_document")
         );
     }
 }
