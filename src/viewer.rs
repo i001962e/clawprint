@@ -217,18 +217,28 @@ fn retry_run_cryptowerk_backfill(
         }
     }
 
-    for event in storage.load_events(None)? {
-        if !proof_needs_retry(event.cryptowerk.as_ref()) {
-            continue;
-        }
+    let unresolved_events: Vec<_> = storage
+        .load_events(None)?
+        .into_iter()
+        .filter(|event| proof_needs_retry(event.cryptowerk.as_ref()))
+        .collect();
+    let unresolved_hashes: Vec<String> = unresolved_events
+        .iter()
+        .map(|event| event.hash_self.clone())
+        .collect();
 
-        match anchor.anchor_hash(&event.hash_self) {
-            Ok(Some(proof)) => {
+    match anchor.anchor_hashes(&unresolved_hashes) {
+        Ok(proofs) => {
+            for (event, proof) in unresolved_events.into_iter().zip(proofs.into_iter()) {
+                let Some(proof) = proof else {
+                    continue;
+                };
                 storage.write_event_cryptowerk_proof(event.event_id, &proof)?;
             }
-            Ok(None) => {}
-            Err(error) => {
-                let proof = cryptowerk_failure(error.to_string());
+        }
+        Err(error) => {
+            let proof = cryptowerk_failure(error.to_string());
+            for event in unresolved_events {
                 storage.write_event_cryptowerk_proof(event.event_id, &proof)?;
             }
         }

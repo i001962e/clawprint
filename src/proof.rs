@@ -44,6 +44,10 @@ impl CryptowerkConfig {
 pub trait RunAnchor: Send + Sync {
     fn anchor_hash(&self, hash: &str) -> Result<Option<CryptowerkProof>>;
 
+    fn anchor_hashes(&self, hashes: &[String]) -> Result<Vec<Option<CryptowerkProof>>> {
+        hashes.iter().map(|hash| self.anchor_hash(hash)).collect()
+    }
+
     fn anchor_completed_run(&self, meta: &RunMeta) -> Result<Option<CryptowerkProof>>;
 }
 
@@ -52,6 +56,10 @@ pub struct NoopRunAnchor;
 impl RunAnchor for NoopRunAnchor {
     fn anchor_hash(&self, _hash: &str) -> Result<Option<CryptowerkProof>> {
         Ok(None)
+    }
+
+    fn anchor_hashes(&self, hashes: &[String]) -> Result<Vec<Option<CryptowerkProof>>> {
+        Ok(vec![None; hashes.len()])
     }
 
     fn anchor_completed_run(&self, _meta: &RunMeta) -> Result<Option<CryptowerkProof>> {
@@ -106,12 +114,12 @@ impl CryptowerkRunAnchor {
         Self { client, config }
     }
 
-    fn register_url(&self, hash: &str) -> String {
+    fn register_url(&self) -> String {
         let mut base = self.config.base_url.trim_end_matches('/').to_string();
         if !base.contains("/API/") {
             base.push_str("/API/v8");
         }
-        format!("{base}/register?hashes={hash}&publiclyRetrievable=true")
+        format!("{base}/register")
     }
 
     fn extract_retrieval_id(value: &serde_json::Value) -> Option<String> {
@@ -139,11 +147,36 @@ impl CryptowerkRunAnchor {
 
         None
     }
-}
 
-#[cfg(feature = "cryptowerk")]
-impl RunAnchor for CryptowerkRunAnchor {
-    fn anchor_hash(&self, hash: &str) -> Result<Option<CryptowerkProof>> {
+    fn extract_retrieval_ids(value: &serde_json::Value) -> Option<Vec<String>> {
+        if let Some(documents) = value.get("documents").and_then(|item| item.as_array()) {
+            let ids: Option<Vec<String>> =
+                documents.iter().map(Self::extract_retrieval_id).collect();
+            if let Some(ids) = ids {
+                return Some(ids);
+            }
+        }
+
+        if let Some(id) = Self::extract_retrieval_id(value) {
+            return Some(vec![id]);
+        }
+
+        for key in ["data", "result", "response"] {
+            if let Some(inner) = value.get(key)
+                && let Some(ids) = Self::extract_retrieval_ids(inner)
+            {
+                return Some(ids);
+            }
+        }
+
+        None
+    }
+
+    fn register_hashes(&self, hashes: &[String]) -> Result<Vec<Option<CryptowerkProof>>> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let api_key = self
             .config
             .api_key
@@ -152,8 +185,12 @@ impl RunAnchor for CryptowerkRunAnchor {
 
         let response = self
             .client
-            .get(self.register_url(hash))
+            .get(self.register_url())
             .header("X-API-Key", api_key)
+            .query(&[
+                ("hashes", hashes.join(",")),
+                ("publiclyRetrievable", "true".to_string()),
+            ])
             .send()?;
 
         let status = response.status();
@@ -165,18 +202,47 @@ impl RunAnchor for CryptowerkRunAnchor {
 
         let json: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| anyhow!("invalid Cryptowerk response: {error}"))?;
-        let retrieval_id = Self::extract_retrieval_id(&json).ok_or_else(|| {
+        let retrieval_ids = Self::extract_retrieval_ids(&json).ok_or_else(|| {
             anyhow!(
-                "Cryptowerk response did not include retrievalId. Expected fields like retrievalId or documents[0].retrievalId; body: {body}"
+                "Cryptowerk response did not include retrievalId values. Expected fields like retrievalId or documents[].retrievalId; body: {body}"
             )
         })?;
 
-        Ok(Some(CryptowerkProof {
-            retrieval_id: Some(retrieval_id.clone()),
-            proof_url: Some(cryptowerk_permalink(&retrieval_id)),
-            registered_at: Utc::now(),
-            error_text: None,
-        }))
+        if retrieval_ids.len() != hashes.len() {
+            return Err(anyhow!(
+                "Cryptowerk returned {} retrieval IDs for {} hashes; body: {body}",
+                retrieval_ids.len(),
+                hashes.len()
+            ));
+        }
+
+        let registered_at = Utc::now();
+        Ok(retrieval_ids
+            .into_iter()
+            .map(|retrieval_id| {
+                Some(CryptowerkProof {
+                    retrieval_id: Some(retrieval_id.clone()),
+                    proof_url: Some(cryptowerk_permalink(&retrieval_id)),
+                    registered_at,
+                    error_text: None,
+                })
+            })
+            .collect())
+    }
+}
+
+#[cfg(feature = "cryptowerk")]
+impl RunAnchor for CryptowerkRunAnchor {
+    fn anchor_hash(&self, hash: &str) -> Result<Option<CryptowerkProof>> {
+        Ok(self
+            .register_hashes(&[hash.to_string()])?
+            .into_iter()
+            .next()
+            .flatten())
+    }
+
+    fn anchor_hashes(&self, hashes: &[String]) -> Result<Vec<Option<CryptowerkProof>>> {
+        self.register_hashes(hashes)
     }
 
     fn anchor_completed_run(&self, meta: &RunMeta) -> Result<Option<CryptowerkProof>> {

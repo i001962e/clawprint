@@ -19,6 +19,9 @@ use crate::{
     storage::RunStorage,
 };
 
+const CRYPTOWERK_EVENT_BATCH_SIZE: usize = 25;
+const CRYPTOWERK_EVENT_FLUSH_SECS: u64 = 5;
+
 /// Summary returned after a recording session ends.
 pub struct RecordingSummary {
     pub duration_secs: i64,
@@ -112,21 +115,30 @@ impl RecordingSession {
         if valid {
             let anchor = build_run_anchor(self.config.cryptowerk.clone());
             let events = storage.load_events(None).unwrap_or_default();
-            for event in events {
-                if event
-                    .cryptowerk
-                    .as_ref()
-                    .and_then(|proof| proof.retrieval_id.as_deref())
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
+            let unresolved_events: Vec<_> = events
+                .into_iter()
+                .filter(|event| {
+                    !event
+                        .cryptowerk
+                        .as_ref()
+                        .and_then(|proof| proof.retrieval_id.as_deref())
+                        .map(|value| !value.trim().is_empty())
+                        .unwrap_or(false)
+                })
+                .collect();
+            let unresolved_hashes: Vec<String> = unresolved_events
+                .iter()
+                .map(|event| event.hash_self.clone())
+                .collect();
 
-                match anchor.anchor_hash(&event.hash_self) {
-                    Ok(Some(cryptowerk)) => {
+            match anchor.anchor_hashes(&unresolved_hashes) {
+                Ok(proofs) => {
+                    for (event, proof) in unresolved_events.into_iter().zip(proofs.into_iter()) {
+                        let Some(proof) = proof else {
+                            continue;
+                        };
                         if let Err(error) =
-                            storage.write_event_cryptowerk_proof(event.event_id, &cryptowerk)
+                            storage.write_event_cryptowerk_proof(event.event_id, &proof)
                         {
                             warn!(
                                 "Failed to persist Cryptowerk event metadata for event {}: {}",
@@ -134,9 +146,10 @@ impl RecordingSession {
                             );
                         }
                     }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let proof = cryptowerk_failure(error.to_string());
+                }
+                Err(error) => {
+                    let proof = cryptowerk_failure(error.to_string());
+                    for event in unresolved_events {
                         if let Err(write_error) =
                             storage.write_event_cryptowerk_proof(event.event_id, &proof)
                         {
@@ -194,63 +207,67 @@ impl RecordingSession {
     }
 }
 
-fn spawn_event_cryptowerk_registration(
+async fn flush_pending_event_cryptowerk_registrations(
     storage: Arc<Mutex<RunStorage>>,
     cryptowerk: Option<CryptowerkConfig>,
-    event: Event,
+    pending_events: &mut Vec<Event>,
 ) {
-    if cryptowerk.is_none() {
+    if cryptowerk.is_none() || pending_events.is_empty() {
         return;
     }
 
-    tokio::spawn(async move {
-        let event_id = event.event_id;
-        let result = tokio::task::spawn_blocking(move || {
-            let anchor = build_run_anchor(cryptowerk);
-            anchor
-                .anchor_hash(&event.hash_self)
-                .map(|proof| (event, proof))
-        })
-        .await;
+    let events = std::mem::take(pending_events);
+    let event_ids: Vec<EventId> = events.iter().map(|event| event.event_id).collect();
+    let hashes: Vec<String> = events.iter().map(|event| event.hash_self.clone()).collect();
 
-        let (event, proof_result) = match result {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => {
-                let proof = cryptowerk_failure(error.to_string());
-                let storage = storage.lock().await;
-                if let Err(write_error) = storage.write_event_cryptowerk_proof(event_id, &proof) {
+    let result = tokio::task::spawn_blocking(move || {
+        let anchor = build_run_anchor(cryptowerk);
+        anchor.anchor_hashes(&hashes)
+    })
+    .await;
+
+    let proofs = match result {
+        Ok(Ok(proofs)) => proofs,
+        Ok(Err(error)) => {
+            let failure = cryptowerk_failure(error.to_string());
+            let storage = storage.lock().await;
+            for event_id in event_ids {
+                if let Err(write_error) = storage.write_event_cryptowerk_proof(event_id, &failure) {
                     warn!(
                         "Failed to persist Cryptowerk event error metadata for event {}: {}",
                         event_id.0, write_error
                     );
                 }
-                return;
             }
-            Err(join_error) => {
-                let proof = cryptowerk_failure(join_error.to_string());
-                let storage = storage.lock().await;
-                if let Err(write_error) = storage.write_event_cryptowerk_proof(event_id, &proof) {
+            return;
+        }
+        Err(join_error) => {
+            let failure = cryptowerk_failure(join_error.to_string());
+            let storage = storage.lock().await;
+            for event_id in event_ids {
+                if let Err(write_error) = storage.write_event_cryptowerk_proof(event_id, &failure) {
                     warn!(
                         "Failed to persist Cryptowerk event join-error metadata for event {}: {}",
                         event_id.0, write_error
                     );
                 }
-                return;
             }
-        };
-
-        let Some(proof) = proof_result else {
             return;
-        };
+        }
+    };
 
-        let storage = storage.lock().await;
-        if let Err(write_error) = storage.write_event_cryptowerk_proof(event.event_id, &proof) {
+    let storage = storage.lock().await;
+    for (event_id, proof) in event_ids.into_iter().zip(proofs.into_iter()) {
+        let Some(proof) = proof else {
+            continue;
+        };
+        if let Err(write_error) = storage.write_event_cryptowerk_proof(event_id, &proof) {
             warn!(
                 "Failed to persist Cryptowerk event metadata for event {}: {}",
-                event.event_id.0, write_error
+                event_id.0, write_error
             );
         }
-    });
+    }
 }
 
 /// Main recording loop
@@ -281,17 +298,10 @@ async fn recording_loop(
         None,
     );
 
-    {
-        let stored_start_event = {
-            let mut guard = storage.lock().await;
-            guard.write_event_and_return(start_event)?
-        };
-        spawn_event_cryptowerk_registration(
-            storage.clone(),
-            config.cryptowerk.clone(),
-            stored_start_event,
-        );
-    }
+    let stored_start_event = {
+        let mut guard = storage.lock().await;
+        guard.write_event_and_return(start_event)?
+    };
 
     // Spawn the gateway event loop on a separate task
     let (event_tx, mut event_rx) = mpsc::channel::<GatewayEvent>(1000);
@@ -303,7 +313,9 @@ async fn recording_loop(
 
     let mut event_counter: u64 = 2;
     let mut flush_interval = interval(Duration::from_millis(config.flush_interval_ms));
+    let mut cryptowerk_flush_interval = interval(Duration::from_secs(CRYPTOWERK_EVENT_FLUSH_SECS));
     let redact = config.redact_secrets;
+    let mut pending_cryptowerk_events = vec![stored_start_event];
 
     // Progress spinner on stderr
     let pb = ProgressBar::new_spinner();
@@ -352,11 +364,15 @@ async fn recording_loop(
                         };
 
                         if let Some(stored_event) = stored_event {
-                            spawn_event_cryptowerk_registration(
-                                storage.clone(),
-                                config.cryptowerk.clone(),
-                                stored_event,
-                            );
+                            pending_cryptowerk_events.push(stored_event);
+                            if pending_cryptowerk_events.len() >= CRYPTOWERK_EVENT_BATCH_SIZE {
+                                flush_pending_event_cryptowerk_registrations(
+                                    storage.clone(),
+                                    config.cryptowerk.clone(),
+                                    &mut pending_cryptowerk_events,
+                                )
+                                .await;
+                            }
                         }
 
                         event_counter += 1;
@@ -382,6 +398,15 @@ async fn recording_loop(
                 }
             }
 
+            _ = cryptowerk_flush_interval.tick() => {
+                flush_pending_event_cryptowerk_registrations(
+                    storage.clone(),
+                    config.cryptowerk.clone(),
+                    &mut pending_cryptowerk_events,
+                )
+                .await;
+            }
+
             _ = shutdown_rx.recv() => {
                 info!("Received shutdown signal");
                 break;
@@ -403,19 +428,19 @@ async fn recording_loop(
         None,
     );
 
-    {
-        let stored_end_event = {
-            let mut guard = storage.lock().await;
-            let stored_end_event = guard.write_event_and_return(end_event)?;
-            guard.flush()?;
-            stored_end_event
-        };
-        spawn_event_cryptowerk_registration(
-            storage.clone(),
-            config.cryptowerk.clone(),
-            stored_end_event,
-        );
-    }
+    let stored_end_event = {
+        let mut guard = storage.lock().await;
+        let stored_end_event = guard.write_event_and_return(end_event)?;
+        guard.flush()?;
+        stored_end_event
+    };
+    pending_cryptowerk_events.push(stored_end_event);
+    flush_pending_event_cryptowerk_registrations(
+        storage.clone(),
+        config.cryptowerk.clone(),
+        &mut pending_cryptowerk_events,
+    )
+    .await;
 
     info!("Recording loop ended, {} events captured", event_counter);
     Ok(())
