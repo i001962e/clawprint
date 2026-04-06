@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     Config, Event, EventId, EventKind, RunId, RunMeta,
     gateway::{GatewayClient, GatewayEvent},
-    proof::{build_run_anchor, cryptowerk_failure},
+    proof::{CryptowerkConfig, build_run_anchor, cryptowerk_failure},
     redact::redact_json,
     storage::RunStorage,
 };
@@ -113,6 +113,16 @@ impl RecordingSession {
             let anchor = build_run_anchor(self.config.cryptowerk.clone());
             let events = storage.load_events(None).unwrap_or_default();
             for event in events {
+                if event
+                    .cryptowerk
+                    .as_ref()
+                    .and_then(|proof| proof.retrieval_id.as_deref())
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
                 match anchor.anchor_hash(&event.hash_self) {
                     Ok(Some(cryptowerk)) => {
                         if let Err(error) =
@@ -184,6 +194,65 @@ impl RecordingSession {
     }
 }
 
+fn spawn_event_cryptowerk_registration(
+    storage: Arc<Mutex<RunStorage>>,
+    cryptowerk: Option<CryptowerkConfig>,
+    event: Event,
+) {
+    if cryptowerk.is_none() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let event_id = event.event_id;
+        let result = tokio::task::spawn_blocking(move || {
+            let anchor = build_run_anchor(cryptowerk);
+            anchor
+                .anchor_hash(&event.hash_self)
+                .map(|proof| (event, proof))
+        })
+        .await;
+
+        let (event, proof_result) = match result {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                let proof = cryptowerk_failure(error.to_string());
+                let storage = storage.lock().await;
+                if let Err(write_error) = storage.write_event_cryptowerk_proof(event_id, &proof) {
+                    warn!(
+                        "Failed to persist Cryptowerk event error metadata for event {}: {}",
+                        event_id.0, write_error
+                    );
+                }
+                return;
+            }
+            Err(join_error) => {
+                let proof = cryptowerk_failure(join_error.to_string());
+                let storage = storage.lock().await;
+                if let Err(write_error) = storage.write_event_cryptowerk_proof(event_id, &proof) {
+                    warn!(
+                        "Failed to persist Cryptowerk event join-error metadata for event {}: {}",
+                        event_id.0, write_error
+                    );
+                }
+                return;
+            }
+        };
+
+        let Some(proof) = proof_result else {
+            return;
+        };
+
+        let storage = storage.lock().await;
+        if let Err(write_error) = storage.write_event_cryptowerk_proof(event.event_id, &proof) {
+            warn!(
+                "Failed to persist Cryptowerk event metadata for event {}: {}",
+                event.event_id.0, write_error
+            );
+        }
+    });
+}
+
 /// Main recording loop
 async fn recording_loop(
     run_id: RunId,
@@ -213,8 +282,15 @@ async fn recording_loop(
     );
 
     {
-        let mut storage = storage.lock().await;
-        storage.write_event(start_event)?;
+        let stored_start_event = {
+            let mut guard = storage.lock().await;
+            guard.write_event_and_return(start_event)?
+        };
+        spawn_event_cryptowerk_registration(
+            storage.clone(),
+            config.cryptowerk.clone(),
+            stored_start_event,
+        );
     }
 
     // Spawn the gateway event loop on a separate task
@@ -264,11 +340,23 @@ async fn recording_loop(
                             redact,
                         );
 
-                        {
+                        let stored_event = {
                             let mut storage = storage.lock().await;
-                            if let Err(e) = storage.write_event(event) {
-                                error!("Failed to write event: {}", e);
+                            match storage.write_event_and_return(event) {
+                                Ok(stored_event) => Some(stored_event),
+                                Err(e) => {
+                                    error!("Failed to write event: {}", e);
+                                    None
+                                }
                             }
+                        };
+
+                        if let Some(stored_event) = stored_event {
+                            spawn_event_cryptowerk_registration(
+                                storage.clone(),
+                                config.cryptowerk.clone(),
+                                stored_event,
+                            );
                         }
 
                         event_counter += 1;
@@ -316,9 +404,17 @@ async fn recording_loop(
     );
 
     {
-        let mut storage = storage.lock().await;
-        storage.write_event(end_event)?;
-        storage.flush()?;
+        let stored_end_event = {
+            let mut guard = storage.lock().await;
+            let stored_end_event = guard.write_event_and_return(end_event)?;
+            guard.flush()?;
+            stored_end_event
+        };
+        spawn_event_cryptowerk_registration(
+            storage.clone(),
+            config.cryptowerk.clone(),
+            stored_end_event,
+        );
     }
 
     info!("Recording loop ended, {} events captured", event_counter);

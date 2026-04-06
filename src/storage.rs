@@ -115,7 +115,13 @@ impl RunStorage {
     }
 
     /// Write event to storage, chaining it to the previous event's hash
-    pub fn write_event(&mut self, mut event: Event) -> Result<()> {
+    pub fn write_event(&mut self, event: Event) -> Result<()> {
+        let _ = self.write_event_and_return(event)?;
+        Ok(())
+    }
+
+    /// Write an event and return the finalized chained form with hash_prev/hash_self set.
+    pub fn write_event_and_return(&mut self, mut event: Event) -> Result<Event> {
         // Determine the previous hash: from the last buffered event, or from storage
         let prev_hash = self
             .batch_buffer
@@ -127,13 +133,13 @@ impl RunStorage {
         event.hash_prev = prev_hash;
         event.hash_self = event.compute_hash();
 
-        self.batch_buffer.push(event);
+        self.batch_buffer.push(event.clone());
 
         if self.batch_buffer.len() >= self.batch_size {
             self.flush()?;
         }
 
-        Ok(())
+        Ok(event)
     }
 
     /// Flush batch to database

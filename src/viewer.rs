@@ -671,15 +671,17 @@ function renderProof(proof){
  parts.push('<div class="proof-note">The impression hash is the final local chain hash. Each trace entry also carries its own hash and previous-link in the log details below.</div>');
  if(proof){
   const when=proof.registeredAt?new Date(proof.registeredAt).toLocaleString():'unknown';
-  const retrieval=proof.retrievalId
+  const hasRetrieval=!!(proof.retrievalId&&proof.retrievalId.trim());
+  const retrieval=hasRetrieval
    ?'<div class="proof-row"><div><div class="proof-label">Cryptowerk retrieval</div><div class="proof-value">'+esc(proof.retrievalId)+'</div></div><div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(proof.retrievalId)+'\')">Copy retrieval ID</button></div></div>'
    :'';
-  const link=proof.proofUrl
+  const link=hasRetrieval&&proof.proofUrl
    ?'<div class="proof-row"><div><div class="proof-label">External verify</div><div class="proof-actions"><a class="mini-link" href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a></div></div><div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button></div></div>'
    :'';
   const status='<div class="proof-row"><div><div class="proof-label">Registered</div><div>'+esc(when)+'</div></div></div>';
+  const retryStatus=!hasRetrieval&&proof.errorText?'<div class="proof-note">Cryptowerk registration failed; the viewer will retry automatically.</div>':'';
   const error=proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'';
-  parts.push(status+retrieval+link+error);
+  parts.push(status+retrieval+link+retryStatus+error);
  }
  card.innerHTML='<div class="proof-grid">'+parts.join('')+'</div>';
 }
@@ -718,18 +720,19 @@ function renderEvents(evs){
   const evidenceBundle=e.evidence_bundle_json||'Unavailable';
   const proof=e.cryptowerk;
   const payload=JSON.stringify(e.payload,null,2);
-  const retrievalId=proof&&proof.retrievalId?proof.retrievalId:'Unavailable';
+  const retrievalId=proof&&proof.retrievalId&&proof.retrievalId.trim()?proof.retrievalId:null;
   const encodedSelfHash=encodeURIComponent(selfHash);
   const encodedPrevHash=encodeURIComponent(prevHash);
   const encodedCanonicalJson=encodeURIComponent(canonicalJson);
   const encodedEvidenceBundle=encodeURIComponent(evidenceBundle);
-  const encodedRetrievalId=encodeURIComponent(retrievalId);
-  const proofBlock=proof
-   ?('<div class="hash-row"><div class="hash-label">Cryptowerk retrieval</div><div class="hash-value">'+esc(retrievalId)+'</div>'
-      +'<div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedRetrievalId+'\')">Copy retrieval ID</button>'+(proof.proofUrl?'<a class="mini-link" href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyEncoded(\''+encodeURIComponent(proof.proofUrl)+'\')">Copy proof URL</button>':'')+'</div>'
-      +(proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'')
-      +'</div>')
-   :'';
+  const encodedRetrievalId=retrievalId?encodeURIComponent(retrievalId):'';
+  const proofRows=[];
+  if(proof&&retrievalId){
+   proofRows.push('<div class="hash-row"><div class="hash-label">Cryptowerk retrieval</div><div class="hash-value">'+esc(retrievalId)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedRetrievalId+'\')">Copy retrieval ID</button>'+(proof.proofUrl?'<a class="mini-link" href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyEncoded(\''+encodeURIComponent(proof.proofUrl)+'\')">Copy proof URL</button>':'')+'</div></div>');
+  } else if(proof&&proof.errorText){
+   proofRows.push('<div class="hash-row"><div class="hash-label">Cryptowerk status</div><div class="hash-note">Registration failed; the viewer will retry automatically.</div><div class="proof-error">'+esc(proof.errorText)+'</div></div>');
+  }
+  const proofBlock=proofRows.join('');
   return '<div class="ev '+esc(e.kind)+'">'
    +'<div class="ev-head"><span class="ev-kind '+esc(e.kind)+'">'+esc(e.kind)+'</span><span class="ev-ts">'+esc(ts)+'</span></div>'
    +'<div class="ev-hash">Hash '+esc(hash)+(e.hash_prev?' · linked':' · chain start')+'</div>'
