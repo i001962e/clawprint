@@ -71,9 +71,9 @@ clawprint mcp --out ./clawprints
 | `verify` | Verify SHA-256 hash chain integrity for a recorded run |
 | `diff` | Compare two runs with event kind breakdown |
 
-## Optional Cryptowerk Anchoring
+## Optional Blockchain Anchoring
 
-Clawprint can optionally register a completed `record` run with Cryptowerk after the local run has already been finalized and verified. This is off by default and does not change daemon mode.
+Clawprint can optionally register a completed `record` run with Cryptowerk after the local run has been finalized. This is off by default and does not change daemon mode.
 
 ```bash
 cargo build --features cryptowerk
@@ -83,7 +83,7 @@ clawprint record \
   --cryptowerk-api-key "$CRYPTOWERK_API_KEY"
 ```
 
-You can also provide `CRYPTOWERK_BASE_URL` and `CRYPTOWERK_API_KEY` via the environment. If registration succeeds, Clawprint writes a `cryptowerk` object into the run's `meta.json` with the retrieval ID and proof URL. If registration fails, the run still seals locally and remains usable.
+You can also provide `CRYPTOWERK_API_KEY` via the environment. If registration succeeds, Clawprint writes a `cryptowerk` object into the run's `meta.json` with the retrieval ID and proof URL. If registration fails, the run still seals locally and remains usable.
 
 ## Serve Mode (All-in-One)
 

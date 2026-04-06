@@ -479,7 +479,7 @@ footer span{opacity:.5}
 </div>
 
 <div class="section" id="proof-section" style="display:none">
-<h2>Verification</h2>
+<h2>Independent Verification</h2>
 <div class="proof-card" id="proof-card"></div>
 </div>
 
@@ -531,12 +531,12 @@ function renderProof(proof){
  if(rootHash){
   parts.push(
    '<div class="proof-row">'
-   +'<div><div class="proof-label">Local seal</div><div class="proof-value">'+esc(rootHash)+'</div></div>'
+   +'<div><div class="proof-label">Chain of evidence hash</div><div class="proof-value">'+esc(rootHash)+'</div></div>'
    +'<div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(rootHash)+'\')">Copy hash</button></div>'
    +'</div>'
   );
  }
- parts.push('<div class="proof-note">The sealed impression is the final local chain hash. Each trace entry also carries its own hash and previous-link in the log details below.</div>');
+ parts.push('<div class="proof-note">The impression hash is the final local chain hash. Each trace entry also carries its own hash and previous-link in the log details below.</div>');
  if(proof){
   const when=proof.registeredAt?new Date(proof.registeredAt).toLocaleString():'unknown';
   const retrieval=proof.retrievalId
@@ -581,7 +581,14 @@ function renderEvents(evs){
   const hash=e.hash_self?e.hash_self.substring(0,16):'';
   const selfHash=e.hash_self||'Unavailable';
   const prevHash=e.hash_prev||'First event in chain';
+  const proof=e.cryptowerk;
   const payload=JSON.stringify(e.payload,null,2);
+  const proofBlock=proof
+   ?('<div class="hash-row"><div class="hash-label">Cryptowerk retrieval</div><div class="hash-value">'+esc(proof.retrievalId||'Unavailable')+'</div>'
+      +(proof.proofUrl?'<div class="hash-actions"><a href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button></div>':'')
+      +(proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'')
+      +'</div>')
+   :'';
   return '<div class="ev '+esc(e.kind)+'">'
    +'<div class="ev-head"><span class="ev-kind '+esc(e.kind)+'">'+esc(e.kind)+'</span><span class="ev-ts">'+esc(ts)+'</span></div>'
    +'<div class="ev-hash">Hash '+esc(hash)+(e.hash_prev?' · linked':' · chain start')+'</div>'
@@ -590,6 +597,7 @@ function renderEvents(evs){
    +'<div class="hash-meta">'
    +'<div class="hash-row"><div class="hash-label">Event hash</div><div class="hash-value">'+esc(selfHash)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(selfHash)+'\')">Copy event hash</button></div></div>'
    +'<div class="hash-row"><div class="hash-label">Previous hash</div><div class="hash-value">'+esc(prevHash)+'</div>'+(e.hash_prev?'<div class="hash-actions"><button class="mini-btn" onclick="copyText(\''+escJs(prevHash)+'\')">Copy previous hash</button></div>':'')+'</div>'
+   +proofBlock
    +'</div>'
    +'<pre>'+esc(payload)+'</pre></div>'
    +'</div>';

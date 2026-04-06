@@ -111,6 +111,34 @@ impl RecordingSession {
 
         if valid {
             let anchor = build_run_anchor(self.config.cryptowerk.clone());
+            let events = storage.load_events(None).unwrap_or_default();
+            for event in events {
+                match anchor.anchor_hash(&event.hash_self) {
+                    Ok(Some(cryptowerk)) => {
+                        if let Err(error) =
+                            storage.write_event_cryptowerk_proof(event.event_id, &cryptowerk)
+                        {
+                            warn!(
+                                "Failed to persist Cryptowerk event metadata for event {}: {}",
+                                event.event_id.0, error
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let proof = cryptowerk_failure(error.to_string());
+                        if let Err(write_error) =
+                            storage.write_event_cryptowerk_proof(event.event_id, &proof)
+                        {
+                            warn!(
+                                "Failed to persist Cryptowerk event error metadata for event {}: {}",
+                                event.event_id.0, write_error
+                            );
+                        }
+                    }
+                }
+            }
+
             match anchor.anchor_completed_run(&meta) {
                 Ok(Some(cryptowerk)) => {
                     let mut updated_meta = meta.clone();

@@ -677,6 +677,7 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
         artifact_refs,
         hash_prev,
         hash_self,
+        cryptowerk: None,
     })
 }
 

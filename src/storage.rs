@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-use crate::{Event, EventId, EventKind, RunId, RunMeta};
+use crate::{CryptowerkProof, Event, EventId, EventKind, RunId, RunMeta};
 
 /// Storage manager for a single run
 pub struct RunStorage {
@@ -60,6 +60,7 @@ impl RunStorage {
             [],
         )?;
         db.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)", [])?;
+        ensure_event_cryptowerk_column(&db)?;
 
         info!("Created storage for run {} at {:?}", run_id.0, run_path);
 
@@ -84,6 +85,7 @@ impl RunStorage {
         }
 
         let db = Connection::open(&db_path)?;
+        ensure_event_cryptowerk_column(&db)?;
 
         // Get last hash for chain continuation
         let last_hash: Option<String> = db
@@ -149,8 +151,8 @@ impl RunStorage {
                 .to_owned();
             tx.execute(
                 "INSERT INTO events
-                 (event_id, ts, kind, span_id, parent_span_id, actor, payload, artifact_refs, hash_prev, hash_self)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (event_id, ts, kind, span_id, parent_span_id, actor, payload, artifact_refs, hash_prev, hash_self, cryptowerk_proof)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     event.event_id.0 as i64,
                     event.ts.to_rfc3339(),
@@ -162,6 +164,11 @@ impl RunStorage {
                     serde_json::to_string(&event.artifact_refs)?,
                     event.hash_prev,
                     event.hash_self,
+                    event
+                        .cryptowerk
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
                 ],
             )?;
             self.last_hash = Some(event.hash_self.clone());
@@ -262,7 +269,7 @@ impl RunStorage {
     pub fn load_events(&self, limit: Option<usize>) -> Result<Vec<Event>> {
         let mut stmt = self.db.prepare(
             "SELECT event_id, ts, kind, span_id, parent_span_id, actor,
-                    payload, artifact_refs, hash_prev, hash_self
+                    payload, artifact_refs, hash_prev, hash_self, cryptowerk_proof
              FROM events ORDER BY event_id",
         )?;
 
@@ -318,6 +325,19 @@ impl RunStorage {
         let meta_path = self.base_path.join("meta.json");
         let meta_json = fs::read_to_string(meta_path)?;
         Ok(serde_json::from_str(&meta_json)?)
+    }
+
+    pub fn write_event_cryptowerk_proof(
+        &self,
+        event_id: EventId,
+        proof: &CryptowerkProof,
+    ) -> Result<()> {
+        let proof_json = serde_json::to_string(proof)?;
+        self.db.execute(
+            "UPDATE events SET cryptowerk_proof = ?1 WHERE event_id = ?2",
+            params![proof_json, event_id.0 as i64],
+        )?;
+        Ok(())
     }
 
     pub fn run_path(&self) -> &Path {
@@ -386,7 +406,7 @@ impl RunStorage {
         // Get paginated events
         let select_sql = format!(
             "SELECT event_id, ts, kind, span_id, parent_span_id, actor,
-                    payload, artifact_refs, hash_prev, hash_self
+                    payload, artifact_refs, hash_prev, hash_self, cryptowerk_proof
              FROM events {} ORDER BY event_id LIMIT ? OFFSET ?",
             where_sql
         );
@@ -463,6 +483,7 @@ impl RunStorage {
         let artifact_refs_str: String = row.get(7)?;
         let hash_prev: Option<String> = row.get(8)?;
         let hash_self: String = row.get(9)?;
+        let cryptowerk_proof_str: Option<String> = row.get(10)?;
 
         let ts = DateTime::parse_from_rfc3339(&ts_str)
             .map_err(|e| {
@@ -493,6 +514,17 @@ impl RunStorage {
         let artifact_refs: Vec<String> = serde_json::from_str(&artifact_refs_str).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
         })?;
+        let cryptowerk = cryptowerk_proof_str
+            .map(|proof| {
+                serde_json::from_str::<CryptowerkProof>(&proof).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+            })
+            .transpose()?;
 
         Ok(Event {
             run_id: run_id.clone(),
@@ -506,8 +538,27 @@ impl RunStorage {
             artifact_refs,
             hash_prev,
             hash_self,
+            cryptowerk,
         })
     }
+}
+
+fn ensure_event_cryptowerk_column(db: &Connection) -> Result<()> {
+    let mut stmt = db.prepare("PRAGMA table_info(events)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_cryptowerk_column = false;
+    for column in columns {
+        if column? == "cryptowerk_proof" {
+            has_cryptowerk_column = true;
+            break;
+        }
+    }
+
+    if !has_cryptowerk_column {
+        db.execute("ALTER TABLE events ADD COLUMN cryptowerk_proof TEXT", [])?;
+    }
+
+    Ok(())
 }
 
 /// List all recorded runs in a directory

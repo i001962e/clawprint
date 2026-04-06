@@ -42,12 +42,18 @@ impl CryptowerkConfig {
 }
 
 pub trait RunAnchor: Send + Sync {
+    fn anchor_hash(&self, hash: &str) -> Result<Option<CryptowerkProof>>;
+
     fn anchor_completed_run(&self, meta: &RunMeta) -> Result<Option<CryptowerkProof>>;
 }
 
 pub struct NoopRunAnchor;
 
 impl RunAnchor for NoopRunAnchor {
+    fn anchor_hash(&self, _hash: &str) -> Result<Option<CryptowerkProof>> {
+        Ok(None)
+    }
+
     fn anchor_completed_run(&self, _meta: &RunMeta) -> Result<Option<CryptowerkProof>> {
         Ok(None)
     }
@@ -100,12 +106,12 @@ impl CryptowerkRunAnchor {
         Self { client, config }
     }
 
-    fn register_url(&self, root_hash: &str) -> String {
+    fn register_url(&self, hash: &str) -> String {
         let mut base = self.config.base_url.trim_end_matches('/').to_string();
         if !base.contains("/API/") {
             base.push_str("/API/v8");
         }
-        format!("{base}/register?hashes={root_hash}&publiclyRetrievable=true")
+        format!("{base}/register?hashes={hash}&publiclyRetrievable=true")
     }
 
     fn extract_retrieval_id(value: &serde_json::Value) -> Option<String> {
@@ -137,7 +143,7 @@ impl CryptowerkRunAnchor {
 
 #[cfg(feature = "cryptowerk")]
 impl RunAnchor for CryptowerkRunAnchor {
-    fn anchor_completed_run(&self, meta: &RunMeta) -> Result<Option<CryptowerkProof>> {
+    fn anchor_hash(&self, hash: &str) -> Result<Option<CryptowerkProof>> {
         let api_key = self
             .config
             .api_key
@@ -146,7 +152,7 @@ impl RunAnchor for CryptowerkRunAnchor {
 
         let response = self
             .client
-            .get(self.register_url(&meta.root_hash))
+            .get(self.register_url(hash))
             .header("X-API-Key", api_key)
             .send()?;
 
@@ -171,6 +177,10 @@ impl RunAnchor for CryptowerkRunAnchor {
             registered_at: Utc::now(),
             error_text: None,
         }))
+    }
+
+    fn anchor_completed_run(&self, meta: &RunMeta) -> Result<Option<CryptowerkProof>> {
+        self.anchor_hash(&meta.root_hash)
     }
 }
 

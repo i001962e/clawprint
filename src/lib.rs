@@ -92,6 +92,9 @@ pub struct Event {
     pub hash_prev: Option<String>,
     /// Hash of this event (computed from canonical form)
     pub hash_self: String,
+    /// Optional external proof metadata for this event hash
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cryptowerk: Option<CryptowerkProof>,
 }
 
 impl Event {
@@ -116,6 +119,7 @@ impl Event {
             artifact_refs: Vec::new(),
             hash_prev: prev_hash,
             hash_self: String::new(), // computed below
+            cryptowerk: None,
         };
         event.hash_self = event.compute_hash();
         event
@@ -311,6 +315,7 @@ mod tests {
             artifact_refs: vec![],
             hash_prev: None,
             hash_self: String::new(),
+            cryptowerk: None,
         };
         e1.hash_self = e1.compute_hash();
 
@@ -326,6 +331,7 @@ mod tests {
             artifact_refs: vec![],
             hash_prev: None,
             hash_self: String::new(),
+            cryptowerk: None,
         };
         e2.hash_self = e2.compute_hash();
 
