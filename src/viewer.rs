@@ -227,6 +227,15 @@ fn retry_run_cryptowerk_backfill(
         .map(|event| event.hash_self.clone())
         .collect();
 
+    if proof_needs_retry(meta.cryptowerk.as_ref()) || !unresolved_hashes.is_empty() {
+        info!(
+            "Cryptowerk backfill retry for run {}: run_proof_pending={} event_hashes_pending={}",
+            meta.run_id.0,
+            proof_needs_retry(meta.cryptowerk.as_ref()),
+            unresolved_hashes.len()
+        );
+    }
+
     match anchor.anchor_hashes(&unresolved_hashes) {
         Ok(proofs) => {
             for (event, proof) in unresolved_events.into_iter().zip(proofs.into_iter()) {
@@ -644,7 +653,7 @@ footer span{opacity:.5}
 </div>
 
 <script>
-const R='{{RUN_ID}}';let page=1,filters=new Set(),search='',pages=1;
+const R='{{RUN_ID}}';let page=1,filters=new Set(),search='',pages=1,retryPoll=null;
 
 async function init(){
  const[run,stats]=await Promise.all([
@@ -660,7 +669,7 @@ async function init(){
  si.style.color=run.chain_valid?'var(--green)':'var(--red)';
  renderProof(run.cryptowerk);
  renderChart(stats.event_breakdown);
- loadEvents();
+ await loadEvents();
 }
 
 function renderProof(proof){
@@ -689,7 +698,7 @@ function renderProof(proof){
    ?'<div class="proof-row"><div><div class="proof-label">External verify</div><div class="proof-actions"><a class="mini-link" href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a></div></div><div class="proof-actions"><button class="mini-btn" onclick="copyText(\''+escJs(proof.proofUrl)+'\')">Copy proof URL</button></div></div>'
    :'';
   const status='<div class="proof-row"><div><div class="proof-label">Registered</div><div>'+esc(when)+'</div></div></div>';
-  const retryStatus=!hasRetrieval&&proof.errorText?'<div class="proof-note">Cryptowerk registration failed; the viewer will retry automatically.</div>':'';
+  const retryStatus=!hasRetrieval&&proof.errorText?'<div class="proof-note">Cryptowerk registration failed; the viewer will retry automatically. Last retry attempt: '+esc(when)+'.</div>':'';
   const error=proof.errorText?'<div class="proof-error">'+esc(proof.errorText)+'</div>':'';
   parts.push(status+retrieval+link+retryStatus+error);
  }
@@ -714,6 +723,33 @@ async function loadEvents(){
  pages=d.total_pages;
  renderEvents(d.events);
  renderPager();
+ const hasPendingEventProofs=d.events.some(e=>e.cryptowerk&&(!e.cryptowerk.retrievalId||!String(e.cryptowerk.retrievalId).trim())&&e.cryptowerk.errorText);
+ updateRetryPolling(hasPendingEventProofs||hasPendingRunProof());
+}
+
+function hasPendingRunProof(){
+ const proof=window.__run&&window.__run.cryptowerk;
+ return !!(proof&&(!proof.retrievalId||!String(proof.retrievalId).trim())&&proof.errorText);
+}
+
+async function refreshProofState(){
+ const run=await fetch('/api/runs/'+R).then(r=>r.json());
+ window.__run=run;
+ const si=document.getElementById('s-integrity');
+ si.textContent=run.chain_valid?'Sealed':'Compromised';
+ si.style.color=run.chain_valid?'var(--green)':'var(--red)';
+ renderProof(run.cryptowerk);
+ await loadEvents();
+}
+
+function updateRetryPolling(shouldPoll){
+ if(shouldPoll&&retryPoll===null){
+  retryPoll=setInterval(()=>{refreshProofState().catch(()=>{});},10000);
+ }
+ if(!shouldPoll&&retryPoll!==null){
+  clearInterval(retryPoll);
+  retryPoll=null;
+ }
 }
 
 function renderEvents(evs){
@@ -740,7 +776,8 @@ function renderEvents(evs){
   if(proof&&retrievalId){
    proofRows.push('<div class="hash-row"><div class="hash-label">Cryptowerk retrieval</div><div class="hash-value">'+esc(retrievalId)+'</div><div class="hash-actions"><button class="mini-btn" onclick="copyEncoded(\''+encodedRetrievalId+'\')">Copy retrieval ID</button>'+(proof.proofUrl?'<a class="mini-link" href="'+esc(proof.proofUrl)+'" target="_blank" rel="noopener noreferrer">Verify on Cryptowerk</a><button class="mini-btn" onclick="copyEncoded(\''+encodeURIComponent(proof.proofUrl)+'\')">Copy proof URL</button>':'')+'</div></div>');
   } else if(proof&&proof.errorText){
-   proofRows.push('<div class="hash-row"><div class="hash-label">Cryptowerk status</div><div class="hash-note">Registration failed; the viewer will retry automatically.</div><div class="proof-error">'+esc(proof.errorText)+'</div></div>');
+   const lastAttempt=proof.registeredAt?new Date(proof.registeredAt).toLocaleString():'unknown';
+   proofRows.push('<div class="hash-row"><div class="hash-label">Cryptowerk status</div><div class="hash-note">Registration failed; the viewer will retry automatically. Last retry attempt: '+esc(lastAttempt)+'.</div><div class="proof-error">'+esc(proof.errorText)+'</div></div>');
   }
   const proofBlock=proofRows.join('');
   return '<div class="ev '+esc(e.kind)+'">'
