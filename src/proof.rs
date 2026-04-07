@@ -9,7 +9,7 @@ const DEFAULT_CRYPTOWERK_BASE_URL: &str = "https://developers.cryptowerk.com/pla
 const CRYPTOWERK_PERMALINK_BASE: &str =
     "https://developers.cryptowerk.com/platform/permalink/sealapiverify";
 #[cfg(feature = "cryptowerk")]
-const MAX_REGISTER_QUERY_CHARS: usize = 3000;
+const MAX_HASHES_PER_REGISTER_REQUEST: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct CryptowerkConfig {
@@ -179,29 +179,10 @@ impl CryptowerkRunAnchor {
             return Ok(Vec::new());
         }
 
-        if hashes.len() > 1 {
+        if hashes.len() > MAX_HASHES_PER_REGISTER_REQUEST {
             let mut all_proofs = Vec::with_capacity(hashes.len());
-            let mut start = 0usize;
-            while start < hashes.len() {
-                let mut end = start;
-                let mut query_len = "publiclyRetrievable=true".len();
-                while end < hashes.len() {
-                    let next_hash_len = if end == start {
-                        hashes[end].len()
-                    } else {
-                        hashes[end].len() + 1
-                    };
-                    if end > start && query_len + next_hash_len > MAX_REGISTER_QUERY_CHARS {
-                        break;
-                    }
-                    query_len += next_hash_len;
-                    end += 1;
-                }
-                if end == start {
-                    end += 1;
-                }
-                all_proofs.extend(self.register_hashes(&hashes[start..end])?);
-                start = end;
+            for chunk in hashes.chunks(MAX_HASHES_PER_REGISTER_REQUEST) {
+                all_proofs.extend(self.register_hashes(chunk)?);
             }
             return Ok(all_proofs);
         }
@@ -214,9 +195,9 @@ impl CryptowerkRunAnchor {
 
         let response = self
             .client
-            .get(self.register_url())
+            .post(self.register_url())
             .header("X-API-Key", api_key)
-            .query(&[
+            .form(&[
                 ("hashes", hashes.join(",")),
                 ("publiclyRetrievable", "true".to_string()),
             ])
@@ -226,13 +207,6 @@ impl CryptowerkRunAnchor {
         let body = response.text()?;
 
         if !status.is_success() {
-            if status == reqwest::StatusCode::BAD_REQUEST
-                && body.contains("Request header is too large")
-            {
-                return Err(anyhow!(
-                    "Cryptowerk register failed (400 Bad Request): request URL was too large for the server"
-                ));
-            }
             return Err(anyhow!("Cryptowerk register failed ({status}): {body}"));
         }
 

@@ -821,7 +821,7 @@ function copyEncoded(encoded){copyText(decodeURIComponent(encoded));}
 function summarizeProofError(text){
  const s=String(text||'');
  if(s.includes('Request header is too large')){
-  return 'Cryptowerk rejected the batch request because the URL was too large. Clawprint will retry with smaller batches.';
+  return 'Cryptowerk rejected an older oversized request. Clawprint now uses POST body registration and will retry automatically.';
  }
  if(s.startsWith('Cryptowerk register failed (400 Bad Request): <!doctype html>')){
   return 'Cryptowerk rejected the request with HTTP 400.';
