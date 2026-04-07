@@ -13,11 +13,15 @@ use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use crate::{
-    Config, EventId, RunId,
+    Config, Event, EventId, RunId,
     gateway::{GatewayClient, GatewayEvent},
     ledger::Ledger,
+    proof::{build_run_anchor, cryptowerk_failure},
     record::gateway_event_to_event,
 };
+
+const CRYPTOWERK_EVENT_BATCH_SIZE: usize = 25;
+const CRYPTOWERK_EVENT_FLUSH_SECS: u64 = 5;
 
 /// Run the daemon: connect to gateway, record to ledger, auto-reconnect.
 pub async fn run_daemon(config: Config) -> Result<()> {
@@ -38,11 +42,6 @@ pub async fn run_daemon_with_shutdown(
     let ledger_path = config.output_dir.clone();
     let ledger = Ledger::open(&ledger_path, config.batch_size)?;
     let ledger = Arc::new(Mutex::new(ledger));
-
-    let auth_token = config.auth_token.clone()
-        .ok_or_else(|| anyhow::anyhow!(
-            "No auth token provided. Use --token or set gateway.auth.token in ~/.openclaw/openclaw.json"
-        ))?;
 
     // Store start time in meta
     {
@@ -81,10 +80,7 @@ pub async fn run_daemon_with_shutdown(
         }
 
         match run_connection(
-            &config.gateway_url,
-            &auth_token,
-            config.redact_secrets,
-            config.flush_interval_ms,
+            &config,
             ledger.clone(),
             &pb,
             &shutdown,
@@ -176,15 +172,17 @@ enum ShutdownReason {
 /// Run a single gateway connection session, writing events to the ledger.
 /// Returns the shutdown reason so the caller can decide whether to reconnect.
 async fn run_connection(
-    gateway_url: &str,
-    auth_token: &str,
-    redact: bool,
-    flush_interval_ms: u64,
+    config: &Config,
     ledger: Arc<Mutex<Ledger>>,
     pb: &ProgressBar,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<ShutdownReason> {
-    let mut client = GatewayClient::new(gateway_url, auth_token)?;
+    let auth_token = config.auth_token.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No auth token provided. Use --token or set gateway.auth.token in ~/.openclaw/openclaw.json"
+        )
+    })?;
+    let mut client = GatewayClient::new(&config.gateway_url, auth_token)?;
     let conn_id = client.connect().await?;
 
     info!("Daemon connected to gateway, connId: {}", conn_id);
@@ -199,9 +197,11 @@ async fn run_connection(
     });
 
     let run_id = RunId("daemon".to_string());
-    let mut flush_interval = interval(Duration::from_millis(flush_interval_ms));
+    let mut flush_interval = interval(Duration::from_millis(config.flush_interval_ms));
+    let mut cryptowerk_flush_interval = interval(Duration::from_secs(CRYPTOWERK_EVENT_FLUSH_SECS));
     // Poll shutdown flag every second
     let mut shutdown_check = interval(Duration::from_secs(1));
+    let mut pending_cryptowerk_events: Vec<Event> = Vec::new();
 
     let result = loop {
         tokio::select! {
@@ -221,14 +221,23 @@ async fn run_connection(
                             &run_id,
                             EventId(0), // ledger assigns the real ID
                             gw_event,
-                            redact,
+                            config.redact_secrets,
                         );
 
                         {
                             let mut l = ledger.lock().await;
-                            if let Err(e) = l.append_event(event) {
-                                error!("Failed to write event: {}", e);
+                            match l.append_event_and_return(event) {
+                                Ok(stored_event) => pending_cryptowerk_events.push(stored_event),
+                                Err(e) => error!("Failed to write event: {}", e),
                             }
+                        }
+
+                        if pending_cryptowerk_events.len() >= CRYPTOWERK_EVENT_BATCH_SIZE {
+                            flush_pending_event_cryptowerk_registrations(
+                                ledger.clone(),
+                                config.cryptowerk.clone(),
+                                &mut pending_cryptowerk_events,
+                            ).await;
                         }
 
                         let total = {
@@ -247,6 +256,14 @@ async fn run_connection(
                 }
             }
 
+            _ = cryptowerk_flush_interval.tick() => {
+                flush_pending_event_cryptowerk_registrations(
+                    ledger.clone(),
+                    config.cryptowerk.clone(),
+                    &mut pending_cryptowerk_events,
+                ).await;
+            }
+
             _ = flush_interval.tick() => {
                 let mut l = ledger.lock().await;
                 if let Err(e) = l.flush() {
@@ -262,10 +279,79 @@ async fn run_connection(
         }
     };
 
+    flush_pending_event_cryptowerk_registrations(
+        ledger.clone(),
+        config.cryptowerk.clone(),
+        &mut pending_cryptowerk_events,
+    ).await;
+
     // Abort the spawned gateway reader to avoid leaking tasks
     handle.abort();
 
     Ok(result)
+}
+
+async fn flush_pending_event_cryptowerk_registrations(
+    ledger: Arc<Mutex<Ledger>>,
+    cryptowerk: Option<crate::proof::CryptowerkConfig>,
+    pending_events: &mut Vec<Event>,
+) {
+    if cryptowerk.is_none() || pending_events.is_empty() {
+        return;
+    }
+
+    let events = std::mem::take(pending_events);
+    let event_ids: Vec<EventId> = events.iter().map(|event| event.event_id).collect();
+    let hashes: Vec<String> = events.iter().map(|event| event.hash_self.clone()).collect();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let anchor = build_run_anchor(cryptowerk);
+        anchor.anchor_hashes(&hashes)
+    })
+    .await;
+
+    let proofs = match result {
+        Ok(Ok(proofs)) => proofs,
+        Ok(Err(error)) => {
+            let failure = cryptowerk_failure(error.to_string());
+            let mut ledger = ledger.lock().await;
+            for event_id in event_ids {
+                if let Err(write_error) = ledger.write_event_cryptowerk_proof(event_id, &failure) {
+                    warn!(
+                        "Failed to persist Cryptowerk daemon event error metadata for event {}: {}",
+                        event_id.0, write_error
+                    );
+                }
+            }
+            return;
+        }
+        Err(join_error) => {
+            let failure = cryptowerk_failure(join_error.to_string());
+            let mut ledger = ledger.lock().await;
+            for event_id in event_ids {
+                if let Err(write_error) = ledger.write_event_cryptowerk_proof(event_id, &failure) {
+                    warn!(
+                        "Failed to persist Cryptowerk daemon event join-error metadata for event {}: {}",
+                        event_id.0, write_error
+                    );
+                }
+            }
+            return;
+        }
+    };
+
+    let mut ledger = ledger.lock().await;
+    for (event_id, proof) in event_ids.into_iter().zip(proofs.into_iter()) {
+        let Some(proof) = proof else {
+            continue;
+        };
+        if let Err(write_error) = ledger.write_event_cryptowerk_proof(event_id, &proof) {
+            warn!(
+                "Failed to persist Cryptowerk daemon event metadata for event {}: {}",
+                event_id.0, write_error
+            );
+        }
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {

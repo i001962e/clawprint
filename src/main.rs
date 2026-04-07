@@ -293,6 +293,18 @@ enum Commands {
         /// Batch size for SQLite commits (for daemon)
         #[arg(long, default_value = "100")]
         batch_size: usize,
+        /// Register daemon event hashes with Cryptowerk as they are recorded
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk: bool,
+        /// Cryptowerk API base URL
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk_base_url: Option<String>,
+        /// Cryptowerk API key
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk_api_key: Option<String>,
         /// Host to bind the viewer
         #[arg(long, default_value = "127.0.0.1")]
         viewer_host: String,
@@ -325,6 +337,18 @@ enum Commands {
         /// Batch size for SQLite commits
         #[arg(long, default_value = "100")]
         batch_size: usize,
+        /// Register daemon event hashes with Cryptowerk as they are recorded
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk: bool,
+        /// Cryptowerk API base URL
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk_base_url: Option<String>,
+        /// Cryptowerk API key
+        #[cfg(feature = "cryptowerk")]
+        #[arg(long)]
+        cryptowerk_api_key: Option<String>,
     },
 }
 
@@ -841,6 +865,12 @@ async fn main() -> Result<()> {
             token,
             no_redact,
             batch_size,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk_base_url,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk_api_key,
             viewer_host,
             viewer_port,
             #[cfg(feature = "mcp")]
@@ -894,6 +924,10 @@ async fn main() -> Result<()> {
                     },
                 };
 
+                #[cfg(feature = "cryptowerk")]
+                let cryptowerk =
+                    CryptowerkConfig::from_sources(cryptowerk, cryptowerk_base_url, cryptowerk_api_key);
+
                 let config = Config {
                     output_dir: out.clone(),
                     redact_secrets: !no_redact,
@@ -901,6 +935,9 @@ async fn main() -> Result<()> {
                     auth_token,
                     batch_size,
                     flush_interval_ms: 200,
+                    #[cfg(feature = "cryptowerk")]
+                    cryptowerk,
+                    #[cfg(not(feature = "cryptowerk"))]
                     cryptowerk: None,
                 };
 
@@ -981,6 +1018,12 @@ async fn main() -> Result<()> {
             token,
             no_redact,
             batch_size,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk_base_url,
+            #[cfg(feature = "cryptowerk")]
+            cryptowerk_api_key,
         } => {
             let auth_token = match token {
                 Some(t) => {
@@ -1001,6 +1044,10 @@ async fn main() -> Result<()> {
                 },
             };
 
+            #[cfg(feature = "cryptowerk")]
+            let cryptowerk =
+                CryptowerkConfig::from_sources(cryptowerk, cryptowerk_base_url, cryptowerk_api_key);
+
             let config = Config {
                 output_dir: out,
                 redact_secrets: !no_redact,
@@ -1008,6 +1055,9 @@ async fn main() -> Result<()> {
                 auth_token,
                 batch_size,
                 flush_interval_ms: 200,
+                #[cfg(feature = "cryptowerk")]
+                cryptowerk,
+                #[cfg(not(feature = "cryptowerk"))]
                 cryptowerk: None,
             };
 
@@ -1018,6 +1068,16 @@ async fn main() -> Result<()> {
                 "Redaction: {}",
                 if config.redact_secrets { "on" } else { "off" }
             );
+            #[cfg(feature = "cryptowerk")]
+            if let Some(cryptowerk) = &config.cryptowerk {
+                if cryptowerk.is_configured() {
+                    info!("Cryptowerk: enabled");
+                } else {
+                    warn!(
+                        "Cryptowerk requested without an API key; external anchoring will be skipped"
+                    );
+                }
+            }
 
             run_daemon(config).await?;
         }

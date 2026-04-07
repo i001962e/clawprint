@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-use crate::{Event, EventId, EventKind, RunId};
+use crate::{CryptowerkProof, Event, EventId, EventKind, RunId};
 
 /// Summary of a single agent conversation run
 #[derive(Debug, Clone)]
@@ -70,10 +70,15 @@ impl Ledger {
                 payload     TEXT NOT NULL,
                 artifact_refs TEXT,
                 hash_prev   TEXT,
-                hash_self   TEXT NOT NULL
+                hash_self   TEXT NOT NULL,
+                cryptowerk_proof TEXT
             )",
             [],
         )?;
+        let _ = db.execute(
+            "ALTER TABLE events ADD COLUMN cryptowerk_proof TEXT",
+            [],
+        );
 
         db.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)", [])?;
         db.execute(
@@ -165,7 +170,13 @@ impl Ledger {
     /// Append an event to the ledger with hash chain linking.
     /// The event_id is assigned by the ledger (sequential) to match
     /// the AUTOINCREMENT primary key in SQLite.
-    pub fn append_event(&mut self, mut event: Event) -> Result<()> {
+    pub fn append_event(&mut self, event: Event) -> Result<()> {
+        let _ = self.append_event_and_return(event)?;
+        Ok(())
+    }
+
+    /// Append an event and return the finalized stored event with assigned ID and hash chain links.
+    pub fn append_event_and_return(&mut self, mut event: Event) -> Result<Event> {
         // Assign sequential event_id matching what AUTOINCREMENT will produce
         self.event_count += 1;
         event.event_id = EventId(self.event_count);
@@ -179,13 +190,14 @@ impl Ledger {
         event.hash_prev = prev_hash;
         event.hash_self = event.compute_hash();
 
+        let stored_event = event.clone();
         self.batch_buffer.push(event);
 
         if self.batch_buffer.len() >= self.batch_size {
             self.flush()?;
         }
 
-        Ok(())
+        Ok(stored_event)
     }
 
     /// Flush buffered events to SQLite.
@@ -208,8 +220,8 @@ impl Ledger {
             tx.execute(
                 "INSERT INTO events
                  (event_id, run_id, ts, kind, agent_run, span_id, parent_span_id, actor,
-                  payload, artifact_refs, hash_prev, hash_self)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  payload, artifact_refs, hash_prev, hash_self, cryptowerk_proof)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     event.event_id.0 as i64,
                     event.run_id.0,
@@ -223,6 +235,11 @@ impl Ledger {
                     serde_json::to_string(&event.artifact_refs)?,
                     event.hash_prev,
                     event.hash_self,
+                    event
+                        .cryptowerk
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
                 ],
             )?;
             self.last_hash = Some(event.hash_self.clone());
@@ -364,7 +381,7 @@ impl Ledger {
     pub fn get_agent_run_events(&self, agent_run: &str) -> Result<Vec<Event>> {
         let mut stmt = self.db.prepare(
             "SELECT event_id, run_id, ts, kind, agent_run, span_id, parent_span_id, actor,
-                    payload, artifact_refs, hash_prev, hash_self
+                    payload, artifact_refs, hash_prev, hash_self, cryptowerk_proof
              FROM events WHERE agent_run = ? ORDER BY event_id",
         )?;
 
@@ -418,7 +435,7 @@ impl Ledger {
         let where_sql = format!("WHERE {}", where_clauses.join(" AND "));
         let sql = format!(
             "SELECT event_id, run_id, ts, kind, agent_run, span_id, parent_span_id, actor,
-                    payload, artifact_refs, hash_prev, hash_self
+                    payload, artifact_refs, hash_prev, hash_self, cryptowerk_proof
              FROM events {} ORDER BY event_id DESC LIMIT ?",
             where_sql
         );
@@ -568,7 +585,7 @@ impl Ledger {
     pub fn verify_chain(&self) -> Result<(bool, u64)> {
         let mut stmt = self.db.prepare(
             "SELECT event_id, run_id, ts, kind, agent_run, span_id, parent_span_id, actor,
-                    payload, artifact_refs, hash_prev, hash_self
+                    payload, artifact_refs, hash_prev, hash_self, cryptowerk_proof
              FROM events ORDER BY event_id",
         )?;
 
@@ -621,6 +638,27 @@ impl Ledger {
             .optional()
             .map_err(Into::into)
     }
+
+    /// Persist Cryptowerk proof metadata for an existing ledger event.
+    pub fn write_event_cryptowerk_proof(
+        &mut self,
+        event_id: EventId,
+        proof: &CryptowerkProof,
+    ) -> Result<()> {
+        for event in &mut self.batch_buffer {
+            if event.event_id == event_id {
+                event.cryptowerk = Some(proof.clone());
+                return Ok(());
+            }
+        }
+
+        let proof_json = serde_json::to_string(proof)?;
+        self.db.execute(
+            "UPDATE events SET cryptowerk_proof = ?1 WHERE event_id = ?2",
+            params![proof_json, event_id.0 as i64],
+        )?;
+        Ok(())
+    }
 }
 
 /// Parse a row from the ledger events table into an Event.
@@ -638,6 +676,7 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
     let artifact_refs_str: String = row.get(9)?;
     let hash_prev: Option<String> = row.get(10)?;
     let hash_self: String = row.get(11)?;
+    let cryptowerk_proof_str: Option<String> = row.get(12)?;
 
     let ts = DateTime::parse_from_rfc3339(&ts_str)
         .map_err(|e| {
@@ -664,6 +703,17 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
     let artifact_refs: Vec<String> = serde_json::from_str(&artifact_refs_str).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
     })?;
+    let cryptowerk: Option<CryptowerkProof> = cryptowerk_proof_str
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+        })
+        .transpose()?;
 
     Ok(Event {
         run_id: RunId(run_id_str),
@@ -677,7 +727,7 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
         artifact_refs,
         hash_prev,
         hash_self,
-        cryptowerk: None,
+        cryptowerk,
     })
 }
 
