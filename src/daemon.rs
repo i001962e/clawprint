@@ -22,6 +22,8 @@ use crate::{
 
 const CRYPTOWERK_EVENT_BATCH_SIZE: usize = 25;
 const CRYPTOWERK_EVENT_FLUSH_SECS: u64 = 5;
+const CRYPTOWERK_RETRY_SECS: u64 = 10;
+const CRYPTOWERK_RETRY_BATCH_SIZE: usize = 100;
 
 /// Run the daemon: connect to gateway, record to ledger, auto-reconnect.
 pub async fn run_daemon(config: Config) -> Result<()> {
@@ -199,6 +201,7 @@ async fn run_connection(
     let run_id = RunId("daemon".to_string());
     let mut flush_interval = interval(Duration::from_millis(config.flush_interval_ms));
     let mut cryptowerk_flush_interval = interval(Duration::from_secs(CRYPTOWERK_EVENT_FLUSH_SECS));
+    let mut cryptowerk_retry_interval = interval(Duration::from_secs(CRYPTOWERK_RETRY_SECS));
     // Poll shutdown flag every second
     let mut shutdown_check = interval(Duration::from_secs(1));
     let mut pending_cryptowerk_events: Vec<Event> = Vec::new();
@@ -264,6 +267,13 @@ async fn run_connection(
                 ).await;
             }
 
+            _ = cryptowerk_retry_interval.tick() => {
+                retry_unresolved_event_cryptowerk_registrations(
+                    ledger.clone(),
+                    config.cryptowerk.clone(),
+                ).await;
+            }
+
             _ = flush_interval.tick() => {
                 let mut l = ledger.lock().await;
                 if let Err(e) = l.flush() {
@@ -284,6 +294,7 @@ async fn run_connection(
         config.cryptowerk.clone(),
         &mut pending_cryptowerk_events,
     ).await;
+    retry_unresolved_event_cryptowerk_registrations(ledger.clone(), config.cryptowerk.clone()).await;
 
     // Abort the spawned gateway reader to avoid leaking tasks
     handle.abort();
@@ -348,6 +359,107 @@ async fn flush_pending_event_cryptowerk_registrations(
         if let Err(write_error) = ledger.write_event_cryptowerk_proof(event_id, &proof) {
             warn!(
                 "Failed to persist Cryptowerk daemon event metadata for event {}: {}",
+                event_id.0, write_error
+            );
+        }
+    }
+}
+
+async fn retry_unresolved_event_cryptowerk_registrations(
+    ledger: Arc<Mutex<Ledger>>,
+    cryptowerk: Option<crate::proof::CryptowerkConfig>,
+) {
+    let Some(config) = cryptowerk else {
+        return;
+    };
+    if !config.is_configured() {
+        return;
+    }
+
+    let unresolved_events = {
+        let ledger = ledger.lock().await;
+        match ledger.list_cryptowerk_proofs(None, None, true, CRYPTOWERK_RETRY_BATCH_SIZE) {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| {
+                    row.event
+                        .cryptowerk
+                        .as_ref()
+                        .and_then(|proof| proof.retrieval_id.as_ref())
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|_| None)
+                        .unwrap_or(Some(row.event))
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                warn!(
+                    "Failed to load unresolved Cryptowerk daemon proofs for retry: {}",
+                    error
+                );
+                return;
+            }
+        }
+    };
+
+    if unresolved_events.is_empty() {
+        return;
+    }
+
+    info!(
+        "Retrying {} unresolved Cryptowerk daemon proof rows",
+        unresolved_events.len()
+    );
+
+    let event_ids: Vec<EventId> = unresolved_events.iter().map(|event| event.event_id).collect();
+    let hashes: Vec<String> = unresolved_events
+        .iter()
+        .map(|event| event.hash_self.clone())
+        .collect();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let anchor = build_run_anchor(Some(config));
+        anchor.anchor_hashes(&hashes)
+    })
+    .await;
+
+    let proofs = match result {
+        Ok(Ok(proofs)) => proofs,
+        Ok(Err(error)) => {
+            let failure = cryptowerk_failure(error.to_string());
+            let mut ledger = ledger.lock().await;
+            for event_id in event_ids {
+                if let Err(write_error) = ledger.write_event_cryptowerk_proof(event_id, &failure) {
+                    warn!(
+                        "Failed to persist Cryptowerk daemon retry error metadata for event {}: {}",
+                        event_id.0, write_error
+                    );
+                }
+            }
+            return;
+        }
+        Err(join_error) => {
+            let failure = cryptowerk_failure(join_error.to_string());
+            let mut ledger = ledger.lock().await;
+            for event_id in event_ids {
+                if let Err(write_error) = ledger.write_event_cryptowerk_proof(event_id, &failure) {
+                    warn!(
+                        "Failed to persist Cryptowerk daemon retry join-error metadata for event {}: {}",
+                        event_id.0, write_error
+                    );
+                }
+            }
+            return;
+        }
+    };
+
+    let mut ledger = ledger.lock().await;
+    for (event_id, proof) in event_ids.into_iter().zip(proofs.into_iter()) {
+        let Some(proof) = proof else {
+            continue;
+        };
+        if let Err(write_error) = ledger.write_event_cryptowerk_proof(event_id, &proof) {
+            warn!(
+                "Failed to persist Cryptowerk daemon retry metadata for event {}: {}",
                 event_id.0, write_error
             );
         }
