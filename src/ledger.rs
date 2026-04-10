@@ -33,6 +33,12 @@ pub struct ToolCallRecord {
     pub agent_run: Option<String>,
 }
 
+/// Ledger event plus its optional persisted Cryptowerk proof metadata.
+#[derive(Debug, Clone)]
+pub struct EventProofRecord {
+    pub event: Event,
+}
+
 /// Single continuous append-only ledger.
 ///
 /// All events are written to one SQLite database with a hash chain.
@@ -658,6 +664,48 @@ impl Ledger {
             params![proof_json, event_id.0 as i64],
         )?;
         Ok(())
+    }
+
+    /// List ledger events with Cryptowerk proof metadata, including unresolved
+    /// rows when `missing_only` is true.
+    pub fn list_cryptowerk_proofs(
+        &self,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+        missing_only: bool,
+        limit: usize,
+    ) -> Result<Vec<EventProofRecord>> {
+        let mut stmt = self.db.prepare(
+            "SELECT
+                event_id, run_id, ts, kind, agent_run, span_id, parent_span_id,
+                actor, payload, artifact_refs, hash_prev, hash_self, cryptowerk_proof
+             FROM events
+             WHERE cryptowerk_proof IS NOT NULL
+               AND (?1 IS NULL OR ts >= ?1)
+               AND (?2 IS NULL OR ts <= ?2)
+               AND (
+                    ?3 = 0
+                    OR json_extract(cryptowerk_proof, '$.retrievalId') IS NULL
+               )
+             ORDER BY event_id DESC
+             LIMIT ?4",
+        )?;
+
+        let rows = stmt.query_map(
+            params![
+                since.map(|dt| dt.to_rfc3339()),
+                until.map(|dt| dt.to_rfc3339()),
+                if missing_only { 1 } else { 0 },
+                limit as i64,
+            ],
+            |row| row_to_event(row).map(|event| EventProofRecord { event }),
+        )?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
     }
 }
 

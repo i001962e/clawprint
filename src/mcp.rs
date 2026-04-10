@@ -82,6 +82,23 @@ pub struct StatsParams {
     pub since: Option<String>,
 }
 
+#[cfg(feature = "cryptowerk")]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CryptowerkProofsParams {
+    /// ISO 8601 datetime — only include events after this time
+    #[serde(default)]
+    pub since: Option<String>,
+    /// ISO 8601 datetime — only include events before this time
+    #[serde(default)]
+    pub until: Option<String>,
+    /// Only show proof rows that do not yet have a retrieval ID
+    #[serde(default)]
+    pub missing_only: Option<bool>,
+    /// Maximum number of rows to return (default 50)
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
 /// The Clawprint MCP server.
 #[derive(Clone)]
 pub struct ClawprintMcp {
@@ -550,6 +567,78 @@ impl ClawprintMcp {
         }
 
         out.push_str(&format!("\nStorage: {}\n", format_bytes(size)));
+
+        text_result(out)
+    }
+
+    #[cfg(feature = "cryptowerk")]
+    #[tool(
+        description = "List Cryptowerk proof records stored for ledger events, including retrieval IDs, proof URLs, and unresolved proof failures"
+    )]
+    async fn clawprint_cryptowerk_proofs(
+        &self,
+        Parameters(params): Parameters<CryptowerkProofsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ledger = self.open_ledger()?;
+
+        let since = params.since.as_deref().and_then(Self::parse_datetime);
+        let until = params.until.as_deref().and_then(Self::parse_datetime);
+        let missing_only = params.missing_only.unwrap_or(false);
+        let limit = params.limit.unwrap_or(50) as usize;
+
+        let rows = ledger
+            .list_cryptowerk_proofs(since, until, missing_only, limit)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        if rows.is_empty() {
+            let msg = if missing_only {
+                "No unresolved Cryptowerk proof rows found.".to_string()
+            } else {
+                "No Cryptowerk proof rows found.".to_string()
+            };
+            return text_result(msg);
+        }
+
+        let mut out = format!("Cryptowerk Proof Rows ({} found)\n\n", rows.len());
+
+        for record in &rows {
+            let event = &record.event;
+            let kind_str = serde_json::to_string(&event.kind)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_owned();
+
+            out.push_str(&format!(
+                "[{}] {} (event #{})\n",
+                event.ts.format("%Y-%m-%d %H:%M:%S"),
+                kind_str,
+                event.event_id.0
+            ));
+            out.push_str(&format!("  Hash: {}\n", event.hash_self));
+
+            if let Some(proof) = &event.cryptowerk {
+                if let Some(retrieval_id) = &proof.retrieval_id {
+                    out.push_str(&format!("  Retrieval ID: {}\n", retrieval_id));
+                } else {
+                    out.push_str("  Retrieval ID: (missing)\n");
+                }
+
+                if let Some(proof_url) = &proof.proof_url {
+                    out.push_str(&format!("  Proof URL:    {}\n", proof_url));
+                }
+
+                out.push_str(&format!(
+                    "  Registered:   {}\n",
+                    proof.registered_at.format("%Y-%m-%d %H:%M:%S UTC")
+                ));
+
+                if let Some(error_text) = &proof.error_text {
+                    out.push_str(&format!("  Error:        {}\n", truncate(error_text, 200)));
+                }
+            }
+
+            out.push('\n');
+        }
 
         text_result(out)
     }
